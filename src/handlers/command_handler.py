@@ -3,8 +3,7 @@
 """
 
 import re
-import time
-from typing import Dict, List, Optional
+from typing import Dict, Optional
 
 from loguru import logger
 from telegram import Update
@@ -16,7 +15,8 @@ from ..config import config
 from ..infra.mcp import MCPService
 from ..models import Command
 from ..services.conversation_service import ConversationService
-from ..utils.database_logger import log_system_event, log_user_action
+from ..services.group_chat_service import GroupChatService
+from ..utils.database_logger import log_user_action
 from .base_handler import BaseHandler
 
 
@@ -30,6 +30,7 @@ class CommandHandler(BaseHandler):
         image_handler=None,
         mcp_service: MCPService = None,
         database_service=None,
+        group_chat_service: GroupChatService = None,
     ):
         super().__init__("CommandHandler", "处理机器人命令")
         self.conversation_service = conversation_service
@@ -37,7 +38,31 @@ class CommandHandler(BaseHandler):
         self.image_handler = image_handler
         self.mcp_service = mcp_service
         self.database_service = database_service
+        self.group_chat_service = group_chat_service
         self.commands = self._initialize_commands()
+
+    async def _reply(self, update: Update, *args, **kwargs):
+        """回复到原 Telegram Forum Topic。"""
+        kwargs.setdefault(
+            "message_thread_id",
+            getattr(update.effective_message, "message_thread_id", None),
+        )
+        try:
+            return await update.effective_message.reply_text(*args, **kwargs)
+        except Exception as exc:
+            logger.warning("命令引用回复失败，回退为 Topic 普通消息: {}", exc)
+            return await update.get_bot().send_message(
+                update.effective_chat.id, *args, **kwargs
+            )
+
+    def _session_key(self, update: Update):
+        if self.group_chat_service:
+            return self.group_chat_service.session_key(update)
+        from ..models import SessionKey
+
+        return SessionKey(
+            update.effective_chat.id, 0, update.effective_user.id, "private"
+        )
 
     def _initialize_commands(self) -> Dict[str, Command]:
         """初始化可用命令"""
@@ -162,15 +187,15 @@ class CommandHandler(BaseHandler):
             # 查找命令
             cmd = self._find_command(command)
             if not cmd:
-                await update.message.reply_text(
-                    f"未知命令: {command}\n使用 /help 查看可用命令"
+                await self._reply(
+                    update, f"未知命令: {command}\n使用 /help 查看可用命令"
                 )
                 return False
 
             # 检查是否需要参数
             if cmd.requires_args and not args:
-                await update.message.reply_text(
-                    f"命令 {cmd.name} 需要参数\n用法: {cmd.usage}"
+                await self._reply(
+                    update, f"命令 {cmd.name} 需要参数\n用法: {cmd.usage}"
                 )
                 return False
 
@@ -193,9 +218,9 @@ class CommandHandler(BaseHandler):
         except Exception as e:
             logger.error(f"命令处理失败: {e}")
             try:
-                await update.message.reply_text("抱歉，命令执行失败，请稍后再试。")
-            except:
-                pass
+                await self._reply(update, "抱歉，命令执行失败，请稍后再试。")
+            except Exception as send_error:
+                logger.error("发送命令错误提示失败: {}", send_error)
             self.log_handling(update, success=False)
             return False
 
@@ -246,7 +271,7 @@ class CommandHandler(BaseHandler):
             elif cmd.name == "my_stats":
                 return await self._handle_my_stats(update, context)
             else:
-                await update.message.reply_text(f"命令 {cmd.name} 尚未实现")
+                await self._reply(update, f"命令 {cmd.name} 尚未实现")
                 return False
 
         except Exception as e:
@@ -258,11 +283,10 @@ class CommandHandler(BaseHandler):
     ) -> bool:
         """处理start命令"""
         try:
-            user_id = update.effective_user.id
-            chat_id = update.message.chat_id
+            session_key = self._session_key(update)
 
             # 获取当前角色
-            current_role = self.conversation_service.get_role(user_id, chat_id)
+            current_role = self.conversation_service.get_role(session_key)
 
             if current_role:
                 # 显示角色问候语
@@ -281,21 +305,22 @@ class CommandHandler(BaseHandler):
                     f"• /search - 搜索图片URL\n\n"
                     f"🌟 开始聊天吧！"
                 )
-                await update.message.reply_text(welcome_message)
+                await self._reply(update, welcome_message)
             else:
                 # 如果没有角色，显示默认欢迎信息
-                await update.message.reply_text(
+                await self._reply(
+                    update,
                     "🎉 欢迎使用AL1S-Bot！\n\n"
                     "💡 使用 /help 查看所有可用命令\n"
                     "🎭 使用 /role 设置角色\n"
-                    "🌟 开始聊天吧！"
+                    "🌟 开始聊天吧！",
                 )
 
             return True
 
         except Exception as e:
             logger.error(f"处理start命令失败: {e}")
-            await update.message.reply_text("❌ 处理start命令时发生错误")
+            await self._reply(update, "❌ 处理start命令时发生错误")
             return False
 
     async def _handle_help(
@@ -330,7 +355,7 @@ class CommandHandler(BaseHandler):
 • 发送图片可以进行相似图片搜索
 • 使用 /search 命令搜索网络图片
         """
-        await update.message.reply_text(help_text.strip())
+        await self._reply(update, help_text.strip())
         return True
 
     async def _handle_role(
@@ -339,10 +364,11 @@ class CommandHandler(BaseHandler):
         """处理角色命令"""
         user_id = update.message.from_user.id
         chat_id = update.message.chat_id
+        session_key = self._session_key(update)
 
         if not args:
             # 显示当前角色
-            conversation = self.conversation_service.get_conversation(user_id, chat_id)
+            conversation = self.conversation_service.get_conversation(session_key)
             current_role = conversation.role
             role_text = f"""
 🎭 当前角色信息：
@@ -352,14 +378,18 @@ class CommandHandler(BaseHandler):
 问候语: {current_role.greeting}
 告别语: {current_role.farewell}
             """
-            await update.message.reply_text(role_text.strip())
+            await self._reply(update, role_text.strip())
         else:
             # 设置新角色
             role_name = args.strip()
-            conversation = self.conversation_service.get_conversation(user_id, chat_id)
+            conversation = self.conversation_service.get_conversation(session_key)
             current_role = conversation.role
 
-            if self.conversation_service.set_role(user_id, chat_id, role_name):
+            async with self.conversation_service.session_lock(session_key):
+                role_changed = self.conversation_service.set_role(
+                    session_key, role_name
+                )
+            if role_changed:
                 # 记录角色切换
                 log_user_action(
                     user_id=user_id,
@@ -370,10 +400,10 @@ class CommandHandler(BaseHandler):
                         "chat_id": chat_id,
                     },
                 )
-                await update.message.reply_text(f"✅ 角色已设置为: {role_name}")
+                await self._reply(update, f"✅ 角色已设置为: {role_name}")
             else:
-                await update.message.reply_text(
-                    f"❌ 角色 {role_name} 不存在\n使用 /roles 查看可用角色"
+                await self._reply(
+                    update, f"❌ 角色 {role_name} 不存在\n使用 /roles 查看可用角色"
                 )
 
         return True
@@ -392,7 +422,7 @@ class CommandHandler(BaseHandler):
             roles_text += f"   特点: {role}\n\n"
 
         roles_text += "💡 使用 /role 角色名 来切换角色"
-        await update.message.reply_text(roles_text.strip())
+        await self._reply(update, roles_text.strip())
         return True
 
     async def _handle_create_role(
@@ -400,15 +430,15 @@ class CommandHandler(BaseHandler):
     ) -> bool:
         """处理创建角色命令"""
         if not args:
-            await update.message.reply_text(
-                "❌ 请提供角色名称和描述\n用法: /create_role 名称 描述"
+            await self._reply(
+                update, "❌ 请提供角色名称和描述\n用法: /create_role 名称 描述"
             )
             return False
 
         parts = args.split(maxsplit=1)
         if len(parts) < 2:
-            await update.message.reply_text(
-                "❌ 请提供角色名称和描述\n用法: /create_role 名称 描述"
+            await self._reply(
+                update, "❌ 请提供角色名称和描述\n用法: /create_role 名称 描述"
             )
             return False
 
@@ -434,11 +464,11 @@ class CommandHandler(BaseHandler):
         if self.conversation_service.create_custom_role(
             name, description, system_prompt
         ):
-            await update.message.reply_text(
-                f"✅ 角色 {name} 创建成功！\n使用 /role {name} 来切换到该角色"
+            await self._reply(
+                update, f"✅ 角色 {name} 创建成功！\n使用 /role {name} 来切换到该角色"
             )
         else:
-            await update.message.reply_text(f"❌ 角色 {name} 已存在")
+            await self._reply(update, f"❌ 角色 {name} 已存在")
 
         return True
 
@@ -446,14 +476,11 @@ class CommandHandler(BaseHandler):
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> bool:
         """处理reset命令"""
-        user_id = update.message.from_user.id
-        chat_id = update.message.chat_id
+        session_key = self._session_key(update)
+        async with self.conversation_service.session_lock(session_key):
+            self.conversation_service.reset_conversation(session_key)
 
-        conversation = self.conversation_service.get_conversation(user_id, chat_id)
-        conversation.messages.clear()
-        conversation.last_activity = time.time()
-
-        await update.message.reply_text("✅ 对话已重置")
+        await self._reply(update, "✅ 对话已重置")
         return True
 
     async def _handle_stats(
@@ -461,28 +488,28 @@ class CommandHandler(BaseHandler):
     ) -> bool:
         """处理stats命令"""
         user_id = update.message.from_user.id
-        chat_id = update.message.chat_id
-
-        conversation = self.conversation_service.get_conversation(user_id, chat_id)
-        stats = self.conversation_service.get_user_stats(user_id)
+        session_key = self._session_key(update)
+        stats = self.conversation_service.get_session_stats(session_key)
 
         stats_text = f"""
 📊 对话统计信息：
 
-用户ID: {stats.get('user_id', 'N/A')}
-总消息数: {stats.get('total_messages', 0)}
-活跃对话数: {stats.get('active_conversations', 0)}
+会话类型: {stats.get('scope_label', 'N/A')}
+群组/聊天ID: {stats.get('chat_id', 'N/A')}
+Topic ID: {stats.get('thread_id', 0)}
+当前会话消息数: {stats.get('message_count', 0)}
 当前角色: {stats.get('current_role', 'N/A')}
+当前用户ID: {user_id}
         """
 
-        await update.message.reply_text(stats_text.strip())
+        await self._reply(update, stats_text.strip())
         return True
 
     async def _handle_ping(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> bool:
         """处理ping命令"""
-        await update.message.reply_text("🏓 Pong! 机器人运行正常")
+        await self._reply(update, "🏓 Pong! 机器人运行正常")
         return True
 
     async def _handle_search(
@@ -490,16 +517,17 @@ class CommandHandler(BaseHandler):
     ) -> bool:
         """处理图片搜索命令"""
         if not args:
-            await update.message.reply_text("❌ 请提供图片URL\n用法: /search 图片URL")
+            await self._reply(update, "❌ 请提供图片URL\n用法: /search 图片URL")
             return False
 
         # 这里需要调用图片处理器的方法
         # 由于命令处理器和图片处理器是分离的，我们需要通过其他方式调用
         # 暂时返回提示信息
-        await update.message.reply_text(
+        await self._reply(
+            update,
             f"🔍 图片搜索功能已准备就绪！\n"
             f"您提供的URL: {args}\n\n"
-            f"💡 提示：直接发送图片文件即可进行相似图片搜索"
+            f"💡 提示：直接发送图片文件即可进行相似图片搜索",
         )
         return True
 
@@ -527,7 +555,7 @@ class CommandHandler(BaseHandler):
 • 使用 /search 命令搜索URL
 • 支持多种图片格式
         """
-        await update.message.reply_text(engines_text.strip())
+        await self._reply(update, engines_text.strip())
         return True
 
     async def _handle_test_search(
@@ -552,7 +580,7 @@ class CommandHandler(BaseHandler):
 • 网络连接稳定
 • API配额充足
         """
-        await update.message.reply_text(test_text.strip())
+        await self._reply(update, test_text.strip())
         return True
 
     def _format_command_help(self, text: str, title: str = None) -> str:
@@ -606,18 +634,18 @@ class CommandHandler(BaseHandler):
             formatted_text = self._format_command_help(text, title)
 
             # 发送消息，启用HTML解析
-            await update.message.reply_text(
-                formatted_text, parse_mode="HTML", disable_web_page_preview=True
+            await self._reply(
+                update, formatted_text, parse_mode="HTML", disable_web_page_preview=True
             )
 
         except Exception as e:
             logger.error(f"发送格式化响应失败: {e}")
             # 如果HTML解析失败，发送纯文本
             try:
-                await update.message.reply_text(text)
+                await self._reply(update, text)
             except Exception as e2:
                 logger.error(f"发送纯文本也失败: {e2}")
-                await update.message.reply_text("抱歉，消息发送失败，请稍后再试。")
+                await self._reply(update, "抱歉，消息发送失败，请稍后再试。")
 
     async def _handle_start_command(self, update, context):
         """处理 /start 命令"""
@@ -661,7 +689,7 @@ class CommandHandler(BaseHandler):
 
         except Exception as e:
             logger.error(f"处理start命令失败: {e}")
-            await update.message.reply_text("启动失败，请稍后再试。")
+            await self._reply(update, "启动失败，请稍后再试。")
 
     async def _handle_help_command(self, update, context):
         """处理 /help 命令"""
@@ -703,7 +731,7 @@ class CommandHandler(BaseHandler):
             roles = self.conversation_service.list_roles()
 
             if not roles:
-                await update.message.reply_text("❌ 没有可用的角色")
+                await self._reply(update, "❌ 没有可用的角色")
                 return
 
             roles_text = "<b>🎭 可用角色列表</b>\n\n"
@@ -730,7 +758,7 @@ class CommandHandler(BaseHandler):
 
         except Exception as e:
             logger.error(f"处理roles命令失败: {e}")
-            await update.message.reply_text("获取角色列表失败，请稍后再试。")
+            await self._reply(update, "获取角色列表失败，请稍后再试。")
 
     async def _handle_role_command(self, update, context):
         """处理 /role 命令"""
@@ -741,7 +769,9 @@ class CommandHandler(BaseHandler):
                 # 显示当前角色
                 user_id = update.effective_user.id
                 chat_id = update.effective_chat.id
-                current_role = self.conversation_service.get_role(user_id, chat_id)
+                current_role = self.conversation_service.get_role(
+                    self._session_key(update)
+                )
 
                 if current_role:
                     role_text = f"<b>🎭 当前角色</b>\n\n"
@@ -768,15 +798,14 @@ class CommandHandler(BaseHandler):
                         update, role_text, "当前角色信息"
                     )
                 else:
-                    await update.message.reply_text("❌ 无法获取当前角色信息")
+                    await self._reply(update, "❌ 无法获取当前角色信息")
                 return
 
             # 切换角色
             role_name = " ".join(args)
-            user_id = update.effective_user.id
-            chat_id = update.effective_chat.id
-
-            success = self.conversation_service.set_role(user_id, chat_id, role_name)
+            session_key = self._session_key(update)
+            async with self.conversation_service.session_lock(session_key):
+                success = self.conversation_service.set_role(session_key, role_name)
 
             if success:
                 role_text = f"✅ 成功切换到角色: <b>{role_name}</b>\n\n"
@@ -784,13 +813,13 @@ class CommandHandler(BaseHandler):
 
                 await self._send_formatted_response(update, role_text, "角色切换成功")
             else:
-                await update.message.reply_text(
-                    f"❌ 切换到角色 '{role_name}' 失败，请检查角色名称是否正确"
+                await self._reply(
+                    update, f"❌ 切换到角色 '{role_name}' 失败，请检查角色名称是否正确"
                 )
 
         except Exception as e:
             logger.error(f"处理role命令失败: {e}")
-            await update.message.reply_text("处理角色命令失败，请稍后再试。")
+            await self._reply(update, "处理角色命令失败，请稍后再试。")
 
     async def _handle_stats_command(self, update, context):
         """处理 /stats 命令"""
@@ -799,8 +828,9 @@ class CommandHandler(BaseHandler):
             chat_id = update.effective_chat.id
 
             # 获取统计信息
-            conversation = self.conversation_service.get_conversation(user_id, chat_id)
-            current_role = self.conversation_service.get_role(user_id, chat_id)
+            session_key = self._session_key(update)
+            conversation = self.conversation_service.get_conversation(session_key)
+            current_role = self.conversation_service.get_role(session_key)
 
             stats_text = "<b>📊 使用统计</b>\n\n"
 
@@ -819,7 +849,7 @@ class CommandHandler(BaseHandler):
 
         except Exception as e:
             logger.error(f"处理stats命令失败: {e}")
-            await update.message.reply_text("获取统计信息失败，请稍后再试。")
+            await self._reply(update, "获取统计信息失败，请稍后再试。")
 
     async def _handle_ping_command(self, update, context):
         """处理 /ping 命令"""
@@ -853,14 +883,15 @@ class CommandHandler(BaseHandler):
         """处理tools命令"""
         try:
             if not self.mcp_service:
-                await update.message.reply_text("❌ MCP功能未启用", parse_mode="HTML")
+                await self._reply(update, "❌ MCP功能未启用", parse_mode="HTML")
                 return False
 
             # 获取可用工具
             tools = self.mcp_service.get_available_tools()
 
             if not tools:
-                await update.message.reply_text(
+                await self._reply(
+                    update,
                     "🔧 <b>可用工具</b>\n\n❌ 暂无可用的MCP工具\n\n"
                     "请检查MCP服务器配置或使用 /mcp_status 查看服务器状态",
                     parse_mode="HTML",
@@ -904,12 +935,12 @@ class CommandHandler(BaseHandler):
             tools_text += "• 支持文件操作、数据库查询等功能\n"
             tools_text += "• 使用 <code>/mcp_status</code> 查看服务器状态"
 
-            await update.message.reply_text(tools_text, parse_mode="HTML")
+            await self._reply(update, tools_text, parse_mode="HTML")
             return True
 
         except Exception as e:
             logger.error(f"处理tools命令失败: {e}")
-            await update.message.reply_text("获取工具信息失败，请稍后再试。")
+            await self._reply(update, "获取工具信息失败，请稍后再试。")
             return False
 
     async def _handle_mcp_status(
@@ -918,7 +949,8 @@ class CommandHandler(BaseHandler):
         """处理mcp_status命令"""
         try:
             if not self.mcp_service:
-                await update.message.reply_text(
+                await self._reply(
+                    update,
                     "❌ <b>MCP状态</b>\n\nMCP功能未启用\n\n"
                     "要启用MCP功能，请在配置文件中设置 <code>mcp.enabled = true</code>",
                     parse_mode="HTML",
@@ -929,7 +961,8 @@ class CommandHandler(BaseHandler):
             server_status = self.mcp_service.get_server_status()
 
             if not server_status:
-                await update.message.reply_text(
+                await self._reply(
+                    update,
                     "🔧 <b>MCP服务器状态</b>\n\n❌ 没有配置任何MCP服务器\n\n"
                     "请在配置文件中添加MCP服务器配置",
                     parse_mode="HTML",
@@ -979,12 +1012,12 @@ class CommandHandler(BaseHandler):
             else:
                 status_text += "⚠️ 所有MCP服务器都未连接，请检查配置"
 
-            await update.message.reply_text(status_text, parse_mode="HTML")
+            await self._reply(update, status_text, parse_mode="HTML")
             return True
 
         except Exception as e:
             logger.error(f"处理mcp_status命令失败: {e}")
-            await update.message.reply_text("获取MCP状态失败，请稍后再试。")
+            await self._reply(update, "获取MCP状态失败，请稍后再试。")
             return False
 
     async def _handle_db_stats(
@@ -994,8 +1027,10 @@ class CommandHandler(BaseHandler):
         try:
             # 从bot实例获取数据库服务
             if not hasattr(self, "database_service"):
-                await update.message.reply_text(
-                    "❌ <b>数据库统计</b>\n\n数据库服务未启用", parse_mode="HTML"
+                await self._reply(
+                    update,
+                    "❌ <b>数据库统计</b>\n\n数据库服务未启用",
+                    parse_mode="HTML",
                 )
                 return False
 
@@ -1029,12 +1064,12 @@ class CommandHandler(BaseHandler):
 
             stats_text += "💡 使用 /my_stats 查看您的个人统计信息"
 
-            await update.message.reply_text(stats_text, parse_mode="HTML")
+            await self._reply(update, stats_text, parse_mode="HTML")
             return True
 
         except Exception as e:
             logger.error(f"处理db_stats命令失败: {e}")
-            await update.message.reply_text("获取数据库统计失败，请稍后再试。")
+            await self._reply(update, "获取数据库统计失败，请稍后再试。")
             return False
 
     async def _handle_my_stats(
@@ -1044,8 +1079,8 @@ class CommandHandler(BaseHandler):
         try:
             # 从bot实例获取数据库服务
             if not hasattr(self, "database_service"):
-                await update.message.reply_text(
-                    "❌ <b>我的统计</b>\n\n数据库服务未启用", parse_mode="HTML"
+                await self._reply(
+                    update, "❌ <b>我的统计</b>\n\n数据库服务未启用", parse_mode="HTML"
                 )
                 return False
 
@@ -1055,8 +1090,8 @@ class CommandHandler(BaseHandler):
             user_stats = await self.database_service.get_user_stats(user_id)
 
             if not user_stats:
-                await update.message.reply_text(
-                    "📊 <b>我的统计</b>\n\n暂无使用记录", parse_mode="HTML"
+                await self._reply(
+                    update, "📊 <b>我的统计</b>\n\n暂无使用记录", parse_mode="HTML"
                 )
                 return True
 
@@ -1077,10 +1112,10 @@ class CommandHandler(BaseHandler):
 
             stats_text += "\n💡 使用 /db_stats 查看全局统计信息"
 
-            await update.message.reply_text(stats_text, parse_mode="HTML")
+            await self._reply(update, stats_text, parse_mode="HTML")
             return True
 
         except Exception as e:
             logger.error(f"处理my_stats命令失败: {e}")
-            await update.message.reply_text("获取个人统计失败，请稍后再试。")
+            await self._reply(update, "获取个人统计失败，请稍后再试。")
             return False

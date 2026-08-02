@@ -2,8 +2,7 @@
 聊天处理器模块
 """
 
-import asyncio
-import re
+import inspect
 import time
 from typing import Optional
 
@@ -17,8 +16,10 @@ from ..infra.mcp import MCPService
 # Agent 服务（统一接口）
 # 注意：现在只会有一个 Agent 服务被初始化
 # 知识提取器已集成到 learning_service 中
-from ..models import Message
+from ..models import Message, SessionKey
 from ..services.conversation_service import ConversationService
+from ..services.group_chat_service import GroupChatService, TriggerDecision
+from ..services.rate_limit_service import RateLimitService
 from .base_handler import BaseHandler
 
 
@@ -31,12 +32,16 @@ class ChatHandler(BaseHandler):
         conversation_service: ConversationService,
         mcp_service: MCPService = None,
         database_service=None,
+        group_chat_service: GroupChatService = None,
+        rate_limit_service: RateLimitService = None,
     ):
         super().__init__("ChatHandler", "处理用户聊天消息")
         self.agent_service = agent_service  # 统一的 Agent 服务接口
         self.conversation_service = conversation_service
         self.mcp_service = mcp_service
         self.database_service = database_service
+        self.group_chat_service = group_chat_service
+        self.rate_limit_service = rate_limit_service
 
         # 知识提取器现在集成在 Agent 服务的学习功能中
 
@@ -208,8 +213,8 @@ class ChatHandler(BaseHandler):
         if not text:
             return text
 
-        import re
         import html as _html
+        import re
 
         converted = text
 
@@ -218,10 +223,16 @@ class ChatHandler(BaseHandler):
             code = match.group(2) or ""
             return f"<pre>{_html.escape(code)}</pre>"
 
-        converted = re.sub(r"```([a-zA-Z0-9_+\-]*)\n([\s\S]*?)```", _codeblock_repl, converted)
+        converted = re.sub(
+            r"```([a-zA-Z0-9_+\-]*)\n([\s\S]*?)```", _codeblock_repl, converted
+        )
 
         # 2) 行内代码 `code`
-        converted = re.sub(r"`([^`]+)`", lambda m: f"<code>{_html.escape(m.group(1))}</code>", converted)
+        converted = re.sub(
+            r"`([^`]+)`",
+            lambda m: f"<code>{_html.escape(m.group(1))}</code>",
+            converted,
+        )
 
         # 3) 粗体 **text** 或 __text__
         converted = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", converted, flags=re.DOTALL)
@@ -229,8 +240,15 @@ class ChatHandler(BaseHandler):
 
         # 4) 斜体 *text* 或 _text_
         # 先处理不被粗体包裹的简单情况
-        converted = re.sub(r"(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)", r"<i>\1</i>", converted, flags=re.DOTALL)
-        converted = re.sub(r"(?<!_)_(?!_)(.+?)(?<!_)_(?!_)", r"<i>\1</i>", converted, flags=re.DOTALL)
+        converted = re.sub(
+            r"(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)",
+            r"<i>\1</i>",
+            converted,
+            flags=re.DOTALL,
+        )
+        converted = re.sub(
+            r"(?<!_)_(?!_)(.+?)(?<!_)_(?!_)", r"<i>\1</i>", converted, flags=re.DOTALL
+        )
 
         # 5) 删除线 ~~text~~
         converted = re.sub(r"~~(.+?)~~", r"<s>\1</s>", converted, flags=re.DOTALL)
@@ -242,7 +260,7 @@ class ChatHandler(BaseHandler):
             # 仅允许 http/https 链接
             if not url.lower().startswith(("http://", "https://")):
                 return label
-            return f"<a href=\"{_html.escape(url)}\">{_html.escape(label)}</a>"
+            return f'<a href="{_html.escape(url)}">{_html.escape(label)}</a>'
 
         converted = re.sub(r"\[([^\]]+)\]\(([^)\s]+)\)", _link_repl, converted)
 
@@ -251,7 +269,9 @@ class ChatHandler(BaseHandler):
             content = match.group(2).strip()
             return f"<b>{_html.escape(content)}</b>\n"
 
-        converted = re.sub(r"^(#{1,6})\s+(.*)$", _heading_repl, converted, flags=re.MULTILINE)
+        converted = re.sub(
+            r"^(#{1,6})\s+(.*)$", _heading_repl, converted, flags=re.MULTILINE
+        )
 
         # 8) 列表项 - / * / 1. -> 使用 \u2022 项符号
         converted = re.sub(r"^\s*[-\*]\s+", "• ", converted, flags=re.MULTILINE)
@@ -350,225 +370,410 @@ class ChatHandler(BaseHandler):
 
             # 发送消息，启用HTML解析
             await update.message.reply_text(
-                formatted_text, parse_mode="HTML", disable_web_page_preview=True
+                formatted_text,
+                parse_mode="HTML",
+                disable_web_page_preview=True,
+                message_thread_id=getattr(update.message, "message_thread_id", None),
             )
 
         except Exception as e:
             logger.error(f"发送响应失败: {e}")
             # 如果HTML解析失败，发送纯文本
             try:
-                await update.message.reply_text(response_text)
-            except Exception as e2:
-                logger.error(f"发送纯文本也失败: {e2}")
-                await update.message.reply_text("抱歉，消息发送失败，请稍后再试。")
-
-    async def handle(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
-        """处理文本消息（非阻塞：LLM处理后台进行）"""
-        try:
-            # 提取消息信息
-            message_info = self.extract_message_info(update)
-            if not message_info:
-                logger.warning("无法提取消息信息或消息为空，跳过处理")
-                return True
-
-            user_id = message_info["user_id"]
-            chat_id = message_info["chat_id"]
-            message = message_info["message"]
-
-            # 记录用户到数据库（确保对话可用）
-            conversation_id = None
-            db_user_id = None
-            if self.database_service:
-                try:
-                    db_user_id = await self.database_service.ensure_user(
-                        telegram_user_id=user_id,
-                        username=update.effective_user.username,
-                        first_name=update.effective_user.first_name,
-                        last_name=update.effective_user.last_name,
-                    )
-
-                    # 获取当前角色
-                    current_role = self.conversation_service.get_role(user_id, chat_id)
-                    role_name = current_role.name if current_role else "AI助手"
-
-                    # 确保对话存在
-                    conversation_id = await self.database_service.ensure_conversation(
-                        user_id=db_user_id, chat_id=chat_id, role_name=role_name
-                    )
-
-                    # 保存用户消息
-                    await self.database_service.save_message(conversation_id, message)
-                except Exception as e:
-                    logger.warning(f"数据库记录失败: {e}")
-
-            # 获取或创建对话与角色
-            conversation = self.conversation_service.get_conversation(
-                user_id=user_id, chat_id=chat_id
-            )
-            role = conversation.role
-            if not role:
-                role = self.conversation_service.get_role(user_id, chat_id)
-                if not role:
-                    default_role_name = "AI助手"
-                    self.conversation_service.set_role(
-                        user_id, chat_id, default_role_name
-                    )
-                    role = self.conversation_service.get_role(user_id, chat_id)
-
-            # 添加用户消息到对话（内存）
-            self.conversation_service.add_message(
-                user_id=user_id, chat_id=chat_id, message=message
-            )
-
-            # 发送个性化占位信息
-            placeholder_text = self._get_placeholder_message(role)
-            placeholder_message = await context.bot.send_message(
-                chat_id=update.effective_chat.id,
-                text=placeholder_text,
-                reply_to_message_id=update.message.message_id,
-            )
-
-            # 后台处理LLM/Agent与RAG，不阻塞当前更新
-            async def _task():
-                await self._process_and_respond(
-                    context=context,
-                    chat_id=update.effective_chat.id,
-                    placeholder_message_id=placeholder_message.message_id,
-                    user_id=user_id,
-                    conv_chat_id=chat_id,
-                    conversation_id=conversation_id,
-                    role=role,
-                    user_message=message,
-                )
-
-            try:
-                if hasattr(context, "application") and context.application:
-                    context.application.create_task(_task())
-                else:
-                    asyncio.create_task(_task())
-            except Exception as e:
-                logger.error(f"创建后台任务失败: {e}")
-
-            return True
-
-        except Exception as e:
-            logger.error(f"处理文本消息失败: {e}")
-            try:
                 await context.bot.send_message(
                     chat_id=update.effective_chat.id,
-                    text="❌ 处理消息时出现错误，请稍后重试。",
-                    reply_to_message_id=update.message.message_id,
+                    text=response_text,
+                    **self._topic_kwargs(update),
+                )
+            except Exception as e2:
+                logger.error(f"发送纯文本也失败: {e2}")
+                await context.bot.send_message(
+                    chat_id=update.effective_chat.id,
+                    text="抱歉，消息发送失败，请稍后再试。",
+                    **self._topic_kwargs(update),
+                )
+
+    @staticmethod
+    def _topic_kwargs(update: Update) -> dict:
+        thread_id = getattr(update.effective_message, "message_thread_id", None)
+        return {"message_thread_id": thread_id} if thread_id is not None else {}
+
+    async def _bot_identity(self, context) -> tuple[str, int]:
+        username = getattr(context.bot, "username", None)
+        bot_id = getattr(context.bot, "id", None)
+        if username and bot_id:
+            return str(username), int(bot_id)
+        bot_user = await context.bot.get_me()
+        return str(bot_user.username or ""), int(bot_user.id)
+
+    async def _send_reply(self, update: Update, context, text: str):
+        kwargs = self._topic_kwargs(update)
+        try:
+            return await context.bot.send_message(
+                chat_id=update.effective_chat.id,
+                text=text,
+                reply_to_message_id=update.effective_message.message_id,
+                **kwargs,
+            )
+        except Exception as exc:
+            logger.warning("引用回复失败，回退为 Topic 普通消息: {}", exc)
+            return await context.bot.send_message(
+                chat_id=update.effective_chat.id,
+                text=text,
+                **kwargs,
+            )
+
+    async def handle(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+        """先执行群策略，再为允许的消息创建后台 Agent 任务。"""
+        started_at = time.monotonic()
+        decision: Optional[TriggerDecision] = None
+        try:
+            if not update.effective_message or not update.effective_user:
+                return False
+            if (
+                self.group_chat_service
+                and await self.group_chat_service.is_duplicate_update(
+                    getattr(update, "update_id", None)
+                )
+            ):
+                logger.warning(
+                    "忽略重复 Telegram Update update_id={}", update.update_id
+                )
+                return True
+
+            bot_username, bot_id = await self._bot_identity(context)
+            decision = (
+                self.group_chat_service.decide(update, bot_username, bot_id)
+                if self.group_chat_service
+                else TriggerDecision(
+                    True, "private", cleaned_text=update.effective_message.text or ""
+                )
+            )
+            session_key = (
+                self.group_chat_service.session_key(update)
+                if self.group_chat_service
+                else SessionKey(
+                    update.effective_chat.id, 0, update.effective_user.id, "private"
+                )
+            )
+            log = logger.bind(
+                chat_id=session_key.chat_id,
+                thread_id=session_key.thread_id,
+                user_id=update.effective_user.id,
+                message_id=update.effective_message.message_id,
+                session_scope=session_key.scope,
+                trigger_type=str(
+                    getattr(decision.trigger_type, "value", decision.trigger_type)
+                ),
+            )
+            if not decision.allowed:
+                if (
+                    decision.denied_reason == "not_triggered"
+                    and self.group_chat_service
+                ):
+                    await self.group_chat_service.observe(update)
+                log.info(
+                    "group_chat_decision allowed=false denied_reason={} agent_called=false response_time={:.3f}",
+                    decision.denied_reason,
+                    time.monotonic() - started_at,
+                )
+                return True
+
+            if self.rate_limit_service:
+                rate = await self.rate_limit_service.check(
+                    update.effective_user.id,
+                    session_key.chat_id,
+                    session_key.thread_id,
+                )
+                if not rate.allowed:
+                    log.warning(
+                        "group_chat_rate_limited dimension={} allowed=false agent_called=false",
+                        rate.dimension,
+                    )
+                    if rate.notify:
+                        await self._send_reply(
+                            update, context, "请求过于频繁，请稍后再试。"
+                        )
+                    return True
+
+            content = decision.cleaned_text.strip() or "请回应这条消息。"
+            user_message = Message(
+                role="user",
+                content=content,
+                timestamp=(
+                    update.effective_message.date.timestamp()
+                    if update.effective_message.date
+                    else time.time()
+                ),
+            )
+            conversation = self.conversation_service.get_conversation(session_key)
+            placeholder = await self._send_reply(
+                update, context, self._get_placeholder_message(conversation.role)
+            )
+            group_context = ""
+            if decision.is_group and self.group_chat_service:
+                group_context = await self.group_chat_service.format_context(
+                    session_key.chat_id,
+                    getattr(update.effective_message, "message_thread_id", None) or 0,
+                )
+
+            # concurrent_updates 已允许不同 Update 并发；在当前处理协程中等待，
+            # 才能保证后续 /reset 按 SessionKey 锁排在本消息之后。
+            await self._process_and_respond(
+                update=update,
+                context=context,
+                session_key=session_key,
+                placeholder_message_id=placeholder.message_id,
+                telegram_user_id=update.effective_user.id,
+                role=conversation.role,
+                user_message=user_message,
+                group_context=group_context,
+                started_at=started_at,
+                trigger_type=str(
+                    getattr(decision.trigger_type, "value", decision.trigger_type)
+                ),
+            )
+            return True
+        except Exception as exc:
+            logger.exception("处理文本消息失败: {}", exc)
+            try:
+                await self._send_reply(
+                    update, context, "❌ 处理消息时出现错误，请稍后重试。"
                 )
             except Exception as send_error:
-                logger.error(f"发送错误消息失败: {send_error}")
+                logger.error("发送错误消息失败: {}", send_error)
             return False
 
     async def _process_and_respond(
         self,
+        update: Update,
         context: ContextTypes.DEFAULT_TYPE,
-        chat_id: int,
+        session_key: SessionKey,
         placeholder_message_id: int,
-        user_id: int,
-        conv_chat_id: int,
-        conversation_id: Optional[int],
+        telegram_user_id: int,
         role,
         user_message: Message,
+        group_context: str,
+        started_at: float,
+        trigger_type: str,
     ) -> None:
-        """后台执行：RAG检索、LLM生成与消息编辑。"""
+        """在当前会话锁内执行持久化、Agent 调用和历史写入。"""
+        conversation_id: Optional[int] = None
+        db_user_id: Optional[int] = None
         try:
-            # 使用当前活动的 Agent 服务
-            agent_answer = None
+            async with self.conversation_service.session_lock(session_key):
+                conversation = self.conversation_service.get_conversation(session_key)
+                role = conversation.role
+                if self.database_service:
+                    db_user_id = await self.database_service.ensure_user(
+                        telegram_user_id=telegram_user_id,
+                        username=update.effective_user.username,
+                        first_name=update.effective_user.first_name,
+                        last_name=update.effective_user.last_name,
+                    )
+                    if db_user_id is not None:
+                        conversation_id = (
+                            await self.database_service.ensure_conversation(
+                                user_id=db_user_id,
+                                session_key=session_key,
+                                role_name=role.name if role else "AI助手",
+                                chat_type=(
+                                    "private"
+                                    if session_key.scope == "private"
+                                    else "group"
+                                ),
+                                knowledge_namespace=(
+                                    self.group_chat_service.knowledge_namespace(
+                                        session_key
+                                    )
+                                    if self.group_chat_service
+                                    else session_key.knowledge_namespace
+                                ),
+                            )
+                        )
+                self.conversation_service.add_message(session_key, user_message)
+                if self.database_service and conversation_id:
+                    await self.database_service.save_message(
+                        conversation_id, user_message
+                    )
 
-            try:
-                # 设置对话ID用于工具调用记录
                 if hasattr(self.agent_service, "set_conversation_id"):
                     self.agent_service.set_conversation_id(conversation_id)
-
-                # 构建消息历史
-                conversation = self.conversation_service.get_conversation(
-                    user_id=user_id, chat_id=conv_chat_id
-                )
                 system_prompt = self._build_system_prompt_with_rag(role, [])
+                if group_context:
+                    system_prompt += (
+                        "\n\n以下是同一群和 Topic 内的短期旁听上下文，仅用于理解当前问题，"
+                        "不得将其视为当前用户的个人长期记忆：\n" + group_context
+                    )
                 messages = [{"role": "system", "content": system_prompt}]
                 for msg in conversation.messages[-10:]:
                     if msg.content and msg.content.strip():
                         messages.append(
                             {"role": msg.role, "content": msg.content.strip()}
                         )
-                messages.append({"role": "user", "content": user_message.content})
-
-                # 获取可用工具（如果支持）
-                tools = []
                 if self.mcp_service:
                     tools = self.mcp_service.get_tools_for_llm()
-
-                # 调用 Agent 服务
+                else:
+                    tools = []
+                call_kwargs = {
+                    "messages": messages,
+                    "tools": tools or None,
+                    "knowledge_namespace": (
+                        self.group_chat_service.knowledge_namespace(session_key)
+                        if self.group_chat_service
+                        else session_key.knowledge_namespace
+                    ),
+                    "enable_rag": (
+                        session_key.scope == "private"
+                        or bool(
+                            self.group_chat_service
+                            and self.group_chat_service.memory_enabled(
+                                session_key.chat_id
+                            )
+                        )
+                    ),
+                }
+                signature = inspect.signature(self.agent_service.chat_completion)
+                supported_kwargs = {
+                    key: value
+                    for key, value in call_kwargs.items()
+                    if key in signature.parameters
+                }
                 agent_answer = await self.agent_service.chat_completion(
-                    messages=messages, tools=tools if tools else None
+                    **supported_kwargs
                 )
+                if not agent_answer:
+                    agent_answer = "抱歉，Agent 未能生成有效回复，请稍后重试。"
 
-                agent_type = (
-                    "LangChain" if hasattr(self.agent_service, "_agent") else "统一"
+                await self._replace_placeholder(
+                    update, context, placeholder_message_id, agent_answer
                 )
-                logger.info(f"使用 {agent_type} Agent 服务生成回复")
-
-            except Exception as e:
-                logger.error(f"Agent 服务失败: {e}")
-                agent_answer = "抱歉，处理您的消息时出现了问题，请稍后重试。"
-
-            # 发送回复
-            if agent_answer:
-                formatted_response = self._format_response(agent_answer)
-                try:
-                    await context.bot.edit_message_text(
-                        chat_id=chat_id,
-                        message_id=placeholder_message_id,
-                        text=formatted_response,
-                        parse_mode="HTML",
-                    )
-                except Exception:
-                    await context.bot.edit_message_text(
-                        chat_id=chat_id,
-                        message_id=placeholder_message_id,
-                        text=agent_answer,
-                    )
-
-                # 记录回复消息
                 bot_message = Message(
                     role="assistant", content=agent_answer, timestamp=time.time()
                 )
-                self.conversation_service.add_message(
-                    user_id=user_id, chat_id=conv_chat_id, message=bot_message
-                )
+                self.conversation_service.add_message(session_key, bot_message)
                 if self.database_service and conversation_id:
                     await self.database_service.save_message(
                         conversation_id, bot_message
                     )
 
-                # 自动学习（如果启用）
-                if hasattr(config, "agent") and config.agent.auto_learning:
-                    try:
-                        if hasattr(self.agent_service, "learn_from_conversation"):
-                            await self.agent_service.learn_from_conversation(
-                                user_message.content,
-                                agent_answer,
-                                conversation_id,
-                                user_id,
-                            )
-                    except Exception as e:
-                        logger.warning(f"自动学习失败: {e}")
-                return
+                learning_allowed = session_key.scope == "private" or bool(
+                    self.group_chat_service
+                    and self.group_chat_service.memory_enabled(session_key.chat_id)
+                )
+                if (
+                    learning_allowed
+                    and getattr(config.agent, "auto_learning", False)
+                    and hasattr(self.agent_service, "learn_from_conversation")
+                    and conversation_id
+                    and db_user_id is not None
+                ):
+                    learning_kwargs = {
+                        "user_message": user_message.content,
+                        "bot_response": agent_answer,
+                        "conversation_id": conversation_id,
+                        "user_id": db_user_id,
+                        "knowledge_namespace": (
+                            self.group_chat_service.knowledge_namespace(session_key)
+                            if self.group_chat_service
+                            else session_key.knowledge_namespace
+                        ),
+                    }
+                    learning_signature = inspect.signature(
+                        self.agent_service.learn_from_conversation
+                    )
+                    await self.agent_service.learn_from_conversation(
+                        **{
+                            key: value
+                            for key, value in learning_kwargs.items()
+                            if key in learning_signature.parameters
+                        }
+                    )
 
-            logger.info(f"成功处理用户 {user_id} 的消息（后台任务）")
-
-        except Exception as e:
-            error_message = f"❌ 处理消息时出现错误：{str(e)}"
+            logger.bind(
+                chat_id=session_key.chat_id,
+                thread_id=session_key.thread_id,
+                user_id=telegram_user_id,
+                message_id=update.effective_message.message_id,
+                session_scope=session_key.scope,
+                trigger_type=trigger_type,
+            ).info(
+                "group_chat_complete allowed=true agent_called=true response_time={:.3f}",
+                time.monotonic() - started_at,
+            )
+        except Exception as exc:
+            error_message = "❌ 处理消息时出现错误，请稍后重试。"
             try:
                 await context.bot.edit_message_text(
-                    chat_id=chat_id,
+                    chat_id=session_key.chat_id,
                     message_id=placeholder_message_id,
                     text=error_message,
                 )
             except Exception as edit_error:
                 logger.error(f"编辑错误消息失败: {edit_error}")
-            logger.error(f"后台任务失败: {e}")
+                try:
+                    await context.bot.send_message(
+                        chat_id=session_key.chat_id,
+                        text=error_message,
+                        **self._topic_kwargs(update),
+                    )
+                except Exception as send_error:
+                    logger.error("错误消息回退发送失败: {}", send_error)
+            logger.exception("后台任务失败: {}", exc)
+
+    @staticmethod
+    def _split_text(text: str, limit: int = 4000) -> list[str]:
+        if len(text) <= limit:
+            return [text]
+        chunks: list[str] = []
+        remaining = text
+        while remaining:
+            split_at = min(limit, len(remaining))
+            if split_at < len(remaining):
+                newline = remaining.rfind("\n", 0, split_at)
+                if newline > limit // 2:
+                    split_at = newline
+            chunks.append(remaining[:split_at])
+            remaining = remaining[split_at:].lstrip("\n")
+        return chunks
+
+    async def _replace_placeholder(
+        self, update: Update, context, placeholder_message_id: int, response: str
+    ) -> None:
+        formatted = self._format_response(response)
+        chunks = self._split_text(formatted)
+        use_html = True
+        try:
+            await context.bot.edit_message_text(
+                chat_id=update.effective_chat.id,
+                message_id=placeholder_message_id,
+                text=chunks[0],
+                parse_mode="HTML",
+            )
+        except Exception as exc:
+            logger.warning("HTML 编辑失败，回退为纯文本: {}", exc)
+            plain_chunks = self._split_text(response)
+            try:
+                await context.bot.edit_message_text(
+                    chat_id=update.effective_chat.id,
+                    message_id=placeholder_message_id,
+                    text=plain_chunks[0],
+                )
+                chunks = plain_chunks
+                use_html = False
+            except Exception as edit_exc:
+                logger.warning("占位消息编辑失败，改为发送新消息: {}", edit_exc)
+                chunks = plain_chunks
+                use_html = False
+                await context.bot.send_message(
+                    chat_id=update.effective_chat.id,
+                    text=chunks[0],
+                    **self._topic_kwargs(update),
+                )
+        for chunk in chunks[1:]:
+            await context.bot.send_message(
+                chat_id=update.effective_chat.id,
+                text=chunk,
+                parse_mode="HTML" if use_html else None,
+                **self._topic_kwargs(update),
+            )

@@ -59,6 +59,16 @@ dev-dependencies = [
   "flake8>=7.3.0",
 ]
 
+[tool.pytest.ini_options]
+pythonpath = ["."]
+asyncio_mode = "auto"
+
+[tool.black]
+target-version = ["py313"]
+
+[tool.isort]
+profile = "black"
+
 [[tool.uv.index]]
 url = "https://mirrors.ustc.edu.cn/pypi/simple/"
 default = true

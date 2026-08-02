@@ -17,11 +17,21 @@ CREATE TABLE IF NOT EXISTS conversations (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id INTEGER NOT NULL,
     chat_id INTEGER NOT NULL,
+    thread_id INTEGER NOT NULL DEFAULT 0,
+    session_scope TEXT NOT NULL DEFAULT 'private',
+    session_owner_id INTEGER NOT NULL DEFAULT 0,
+    knowledge_namespace TEXT NOT NULL DEFAULT '',
+    chat_type TEXT NOT NULL DEFAULT 'private',
     role_name TEXT DEFAULT 'AI助手',
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (user_id) REFERENCES users (id),
-    UNIQUE(user_id, chat_id)
+    UNIQUE(chat_id, thread_id, session_scope, session_owner_id)
+);
+
+CREATE TABLE IF NOT EXISTS schema_migrations (
+    version INTEGER PRIMARY KEY,
+    applied_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
 
 -- 消息记录表
@@ -62,6 +72,9 @@ CREATE TABLE IF NOT EXISTS tool_calls (
 CREATE INDEX IF NOT EXISTS idx_messages_conversation_id ON messages(conversation_id);
 CREATE INDEX IF NOT EXISTS idx_messages_timestamp ON messages(timestamp);
 CREATE INDEX IF NOT EXISTS idx_conversations_user_chat ON conversations(user_id, chat_id);
+CREATE INDEX IF NOT EXISTS idx_conversations_session ON conversations(
+    chat_id, thread_id, session_scope, session_owner_id
+);
 CREATE INDEX IF NOT EXISTS idx_tool_calls_conversation_id ON tool_calls(conversation_id);
 CREATE INDEX IF NOT EXISTS idx_tool_calls_timestamp ON tool_calls(timestamp);
 
@@ -115,6 +128,7 @@ CREATE TABLE IF NOT EXISTS knowledge_entries (
     importance_score REAL DEFAULT 0.0, -- 重要性评分
     embedding_id TEXT, -- 对应的向量嵌入ID
     source_message_id INTEGER, -- 来源消息ID
+    knowledge_namespace TEXT NOT NULL DEFAULT '',
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (user_id) REFERENCES users (id),
@@ -178,6 +192,7 @@ CREATE INDEX IF NOT EXISTS idx_knowledge_entries_category ON knowledge_entries (
 CREATE INDEX IF NOT EXISTS idx_knowledge_entries_importance ON knowledge_entries (importance_score DESC);
 
 CREATE INDEX IF NOT EXISTS idx_knowledge_entries_created_at ON knowledge_entries (created_at);
+CREATE INDEX IF NOT EXISTS idx_knowledge_namespace ON knowledge_entries (knowledge_namespace);
 
 CREATE INDEX IF NOT EXISTS idx_embeddings_knowledge_entry_id ON embeddings (knowledge_entry_id);
 
@@ -219,3 +234,5 @@ SELECT
     ) as usage_rate,
     MAX(timestamp) as last_created
 FROM knowledge_retrievals;
+
+INSERT OR IGNORE INTO schema_migrations(version) VALUES (2);

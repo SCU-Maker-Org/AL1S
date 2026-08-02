@@ -9,12 +9,15 @@ from loguru import logger
 from telegram import BotCommand, Update
 from telegram.ext import (
     Application,
+    ChatMemberHandler,
     CommandHandler,
     ContextTypes,
     MessageHandler,
     filters,
 )
 
+from .agents.langchain_agent_service import LangChainAgentService
+from .agents.unified_agent import UnifiedAgentService
 from .config import config
 from .handlers.chat_handler import ChatHandler
 from .handlers.command_handler import CommandHandler as CmdHandler
@@ -23,8 +26,8 @@ from .infra.database import DatabaseService
 from .infra.mcp import MCPService
 from .services.ascii2d_service import Ascii2DService
 from .services.conversation_service import ConversationService
-from .agents.langchain_agent_service import LangChainAgentService
-from .agents.unified_agent import UnifiedAgentService
+from .services.group_chat_service import GroupChatService
+from .services.rate_limit_service import RateLimitService
 from .utils.database_logger import init_database_logger
 
 
@@ -65,6 +68,14 @@ class AL1SBot:
             "forget": "知识清理说明",
             "rebuild_index": "索引重建说明",
         },
+        "group": {
+            "group_status": "查看当前群聊配置",
+            "group_enable": "在当前群启用机器人",
+            "group_disable": "在当前群停用机器人",
+            "group_scope": "设置当前群会话作用域",
+            "group_memory": "设置当前群长期学习",
+            "group_wake_words": "设置当前群唤醒词",
+        },
     }
 
     @property
@@ -83,7 +94,6 @@ class AL1SBot:
         self.mcp_service = MCPService() if config.mcp.enabled else None
 
         # 初始化服务（传入MCP工具处理器）
-        tool_handler = self._create_tool_handler() if self.mcp_service else None
         self.database_service = DatabaseService()
 
         # 初始化数据库记录器
@@ -93,6 +103,8 @@ class AL1SBot:
         self.conversation_service = ConversationService(
             database_service=self.database_service
         )
+        self.group_chat_service = GroupChatService(config.telegram.group)
+        self.rate_limit_service = RateLimitService(config.telegram.rate_limit)
 
         # 根据配置选择 Agent 类型（互斥）
         self.unified_agent_service = None
@@ -135,9 +147,15 @@ class AL1SBot:
             self.conversation_service,
             self.mcp_service,
             self.database_service,
+            self.group_chat_service,
+            self.rate_limit_service,
         )
         self.image_handler = ImageHandler(
-            self.ascii2d_service, self.active_agent_service, self.conversation_service
+            self.ascii2d_service,
+            self.active_agent_service,
+            self.conversation_service,
+            self.group_chat_service,
+            self.rate_limit_service,
         )
 
         # 处理器列表
@@ -261,10 +279,20 @@ class AL1SBot:
             self.image_handler,  # 传入图片处理器引用
             self.mcp_service,  # 传入MCP服务引用
             self.database_service,  # 传入数据库服务引用
+            self.group_chat_service,
         )
 
         # 批量注册命令处理器
         self._register_command_handlers()
+
+        self.application.add_handler(
+            ChatMemberHandler(
+                self._handle_my_chat_member, ChatMemberHandler.MY_CHAT_MEMBER
+            )
+        )
+        self.application.add_handler(
+            ChatMemberHandler(self._handle_chat_member, ChatMemberHandler.CHAT_MEMBER)
+        )
 
         # 图片处理器
         self.application.add_handler(
@@ -292,7 +320,10 @@ class AL1SBot:
                 handler_name = f"_handle_{command}_command"
                 if hasattr(self, handler_name):
                     handler = getattr(self, handler_name)
-                    self.application.add_handler(CommandHandler(command, handler))
+                    guarded = self._guard_command(
+                        handler, management_command=group_name == "group"
+                    )
+                    self.application.add_handler(CommandHandler(command, guarded))
                     registered_count += 1
                 else:
                     logger.warning(f"命令处理器不存在: {handler_name}")
@@ -318,6 +349,81 @@ class AL1SBot:
             return self.active_agent_service is not None
 
         return True  # 默认启用
+
+    def _guard_command(self, handler, *, management_command: bool = False):
+        """统一执行群权限、命令目标、去重和限流检查。"""
+
+        async def guarded(update: Update, context: ContextTypes.DEFAULT_TYPE):
+            if await self.group_chat_service.is_duplicate_update(
+                getattr(update, "update_id", None)
+            ):
+                logger.warning("忽略重复命令 Update update_id={}", update.update_id)
+                return
+            username = getattr(context.bot, "username", None)
+            bot_id = getattr(context.bot, "id", None)
+            if not username or not bot_id:
+                me = await context.bot.get_me()
+                username, bot_id = me.username or "", me.id
+            decision = self.group_chat_service.decide(
+                update,
+                str(username),
+                int(bot_id),
+                is_command=True,
+                management_command=management_command,
+            )
+            session_key = self.group_chat_service.session_key(update)
+            if not decision.allowed:
+                logger.bind(
+                    chat_id=session_key.chat_id,
+                    thread_id=session_key.thread_id,
+                    user_id=update.effective_user.id,
+                    message_id=update.effective_message.message_id,
+                    session_scope=session_key.scope,
+                    trigger_type="command",
+                ).info(
+                    "group_command_decision allowed=false denied_reason={} agent_called=false",
+                    decision.denied_reason,
+                )
+                return
+            rate = await self.rate_limit_service.check(
+                update.effective_user.id,
+                session_key.chat_id,
+                session_key.thread_id,
+            )
+            if not rate.allowed:
+                if rate.notify:
+                    await self._reply(update, context, "请求过于频繁，请稍后再试。")
+                return
+            await handler(update, context)
+
+        return guarded
+
+    async def _reply(self, update: Update, context, *args, **kwargs):
+        kwargs.setdefault(
+            "message_thread_id",
+            getattr(update.effective_message, "message_thread_id", None),
+        )
+        try:
+            return await update.effective_message.reply_text(*args, **kwargs)
+        except Exception as exc:
+            logger.warning("命令引用回复失败，回退为 Topic 普通消息: {}", exc)
+            return await context.bot.send_message(
+                update.effective_chat.id, *args, **kwargs
+            )
+
+    async def _require_group_admin(self, update: Update, context) -> bool:
+        if not self.group_chat_service.is_group(update):
+            await self._reply(update, context, "该命令只能在群聊中使用。")
+            return False
+        allowed = await self.group_chat_service.is_admin(
+            context,
+            update.effective_chat.id,
+            update.effective_user.id,
+            self.config.telegram.admin_user_ids,
+        )
+        if not allowed:
+            await self._reply(update, context, "权限不足：仅群管理员可执行该命令。")
+        return allowed
 
     def get_enabled_commands(self) -> Dict[str, str]:
         """获取当前启用的命令列表"""
@@ -412,6 +518,7 @@ class AL1SBot:
                 "search": "🔍 图片搜索",
                 "tools": "🛠️ MCP工具",
                 "knowledge": "🧠 知识管理",
+                "group": "👥 群聊管理",
             }
 
             # 按组显示启用的命令
@@ -426,11 +533,11 @@ class AL1SBot:
 
             help_text += "💡 <i>提示：直接发送消息即可与AI对话</i>"
 
-            await update.message.reply_text(help_text, parse_mode="HTML")
+            await self._reply(update, context, help_text, parse_mode="HTML")
 
         except Exception as e:
             logger.error(f"处理帮助命令失败: {e}")
-            await update.message.reply_text("❌ 获取帮助信息失败")
+            await self._reply(update, context, "❌ 获取帮助信息失败")
 
     async def _handle_role_command(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
@@ -531,7 +638,7 @@ class AL1SBot:
         """处理rag_stats命令"""
         try:
             if not self.active_agent_service:
-                await update.message.reply_text("❌ Agent服务未启用")
+                await self._reply(update, context, "❌ Agent服务未启用")
                 return
 
             # 尝试获取学习统计信息
@@ -548,7 +655,11 @@ class AL1SBot:
             if isinstance(stats, dict):
                 has_dict_values = any(isinstance(v, dict) for v in stats.values())
 
-                if ("total_learned" in stats) or ("total_knowledge_in_db" in stats) or not has_dict_values:
+                if (
+                    ("total_learned" in stats)
+                    or ("total_knowledge_in_db" in stats)
+                    or not has_dict_values
+                ):
                     # 新版/平铺结构
                     total_learned = int(stats.get("total_learned", 0) or 0)
                     failed = int(stats.get("failed_extractions", 0) or 0)
@@ -573,7 +684,7 @@ class AL1SBot:
                             continue
 
                         if table_name == "vector_index":
-                            message += f"🔍 <b>向量索引</b>\n"
+                            message += "🔍 <b>向量索引</b>\n"
                             message += f"• 向量数量: {info.get('total_vectors', 0)}\n"
                             message += f"• 向量维度: {info.get('dimension', '-')}\n"
                             message += f"• 索引类型: {info.get('index_type', '-')}\n\n"
@@ -591,7 +702,11 @@ class AL1SBot:
                             metric_name = (
                                 "平均重要性"
                                 if table_name == "knowledge_entries"
-                                else "平均维度" if table_name == "embeddings" else "使用率"
+                                else (
+                                    "平均维度"
+                                    if table_name == "embeddings"
+                                    else "使用率"
+                                )
                             )
                             add_metric = info.get("additional_metric")
                             if isinstance(add_metric, (int, float)):
@@ -604,11 +719,11 @@ class AL1SBot:
                                 message += f"• 最后更新: {last_created}\n"
                             message += "\n"
 
-            await update.message.reply_text(message, parse_mode="HTML")
+            await self._reply(update, context, message, parse_mode="HTML")
 
         except Exception as e:
             logger.error(f"获取RAG统计失败: {e}")
-            await update.message.reply_text("❌ 获取RAG统计失败")
+            await self._reply(update, context, "❌ 获取RAG统计失败")
 
     async def _handle_knowledge_command(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
@@ -618,7 +733,9 @@ class AL1SBot:
             args = context.args
 
             if not args:
-                await update.message.reply_text(
+                await self._reply(
+                    update,
+                    context,
                     "📚 <b>知识管理</b>\n\n"
                     "新版本中，知识通过自动学习功能从对话中提取。\n"
                     "您可以通过与机器人对话来自动积累知识！\n\n"
@@ -635,10 +752,12 @@ class AL1SBot:
                 query = " ".join(args[1:])
                 # 使用新的向量搜索服务
                 if hasattr(self.active_agent_service, "vector_service"):
-                    results = (
-                        await self.active_agent_service.vector_service.search_knowledge(
-                            query, top_k=3
-                        )
+                    results = await self.active_agent_service.vector_service.search_knowledge(
+                        query,
+                        top_k=3,
+                        knowledge_namespace=self.group_chat_service.knowledge_namespace(
+                            self.group_chat_service.session_key(update)
+                        ),
                     )
                     if results:
                         message = f"🔍 <b>搜索结果：{query}</b>\n\n"
@@ -649,24 +768,26 @@ class AL1SBot:
                             ]
                             score = result.get("similarity_score", 0)
                             message += f"{i}. <b>{title}</b>\n{content}...\n相似度: {score:.2f}\n\n"
-                        await update.message.reply_text(message, parse_mode="HTML")
+                        await self._reply(update, context, message, parse_mode="HTML")
                     else:
-                        await update.message.reply_text("🔍 没有找到相关知识")
+                        await self._reply(update, context, "🔍 没有找到相关知识")
                 else:
-                    await update.message.reply_text("❌ 搜索功能不可用")
+                    await self._reply(update, context, "❌ 搜索功能不可用")
             else:
-                await update.message.reply_text("❌ 无效的命令格式")
+                await self._reply(update, context, "❌ 无效的命令格式")
 
         except Exception as e:
             logger.error(f"处理知识命令失败: {e}")
-            await update.message.reply_text("❌ 处理命令失败")
+            await self._reply(update, context, "❌ 处理命令失败")
 
     async def _handle_learn_command(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ):
         """处理learn命令 - 手动触发学习"""
         try:
-            await update.message.reply_text(
+            await self._reply(
+                update,
+                context,
                 "🧠 <b>自动学习</b>\n\n"
                 "新版本中，机器人会自动从对话中学习。\n"
                 "无需手动触发学习过程！\n\n"
@@ -676,14 +797,16 @@ class AL1SBot:
 
         except Exception as e:
             logger.error(f"处理学习命令失败: {e}")
-            await update.message.reply_text("❌ 学习失败")
+            await self._reply(update, context, "❌ 学习失败")
 
     async def _handle_forget_command(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ):
         """处理forget命令 - 清理旧知识"""
         try:
-            await update.message.reply_text(
+            await self._reply(
+                update,
+                context,
                 "🗑️ <b>知识清理</b>\n\n"
                 "如需清理知识库，请使用新的优化功能：\n"
                 "机器人会自动管理知识生命周期。",
@@ -692,14 +815,16 @@ class AL1SBot:
 
         except Exception as e:
             logger.error(f"处理遗忘命令失败: {e}")
-            await update.message.reply_text("❌ 清理失败")
+            await self._reply(update, context, "❌ 清理失败")
 
     async def _handle_rebuild_index_command(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ):
         """处理rebuild_index命令 - 重建向量索引"""
         try:
-            await update.message.reply_text(
+            await self._reply(
+                update,
+                context,
                 "🔄 <b>重建索引</b>\n\n"
                 "新架构中，向量索引会自动维护。\n"
                 "如需重新初始化，请重启机器人。",
@@ -708,7 +833,153 @@ class AL1SBot:
 
         except Exception as e:
             logger.error(f"重建索引失败: {e}")
-            await update.message.reply_text("❌ 重建索引失败")
+            await self._reply(update, context, "❌ 重建索引失败")
+
+    async def _handle_group_status_command(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ):
+        if not await self._require_group_admin(update, context):
+            return
+        chat_id = update.effective_chat.id
+        thread_id = getattr(update.effective_message, "message_thread_id", None) or 0
+        group = self.config.telegram.group
+        count = await self.group_chat_service.context_count(chat_id, thread_id)
+        text = (
+            "<b>群聊配置</b>\n\n"
+            f"chat_id: <code>{chat_id}</code>\n"
+            f"message_thread_id: <code>{thread_id}</code>\n"
+            f"群聊功能: {'启用' if self.group_chat_service.is_enabled(chat_id) else '停用'}\n"
+            f"会话作用域: <code>{self.group_chat_service.session_scope(chat_id)}</code>\n"
+            f"要求触发词/提及: {'是' if group.require_mention else '否'}\n"
+            f"记录旁听上下文: {'是' if group.observe_unmentioned_messages else '否'}\n"
+            f"上下文缓冲: {count}/{group.context_buffer_size}\n"
+            f"长期群知识学习: {'启用' if self.group_chat_service.memory_enabled(chat_id) else '停用'}"
+        )
+        await self._reply(update, context, text, parse_mode="HTML")
+
+    async def _handle_group_enable_command(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ):
+        if await self._require_group_admin(update, context):
+            self.group_chat_service.set_enabled(update.effective_chat.id, True)
+            await self._reply(update, context, "已在当前群启用机器人。")
+
+    async def _handle_group_disable_command(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ):
+        if await self._require_group_admin(update, context):
+            self.group_chat_service.set_enabled(update.effective_chat.id, False)
+            await self._reply(update, context, "已在当前群停用机器人。")
+
+    async def _handle_group_scope_command(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ):
+        if not await self._require_group_admin(update, context):
+            return
+        scope = context.args[0].lower() if context.args else ""
+        if not self.group_chat_service.set_scope(update.effective_chat.id, scope):
+            await self._reply(
+                update,
+                context,
+                "用法：/group_scope per_user|shared|topic",
+            )
+            return
+        await self._reply(update, context, f"当前群会话作用域已设置为 {scope}。")
+
+    async def _handle_group_memory_command(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ):
+        if not await self._require_group_admin(update, context):
+            return
+        value = context.args[0].lower() if context.args else ""
+        if value not in {"on", "off"}:
+            await self._reply(update, context, "用法：/group_memory on|off")
+            return
+        if not self.group_chat_service.set_memory_enabled(
+            update.effective_chat.id, value == "on"
+        ):
+            await self._reply(update, context, "配置禁止管理员切换群知识学习。")
+            return
+        await self._reply(
+            update,
+            context,
+            f"当前群长期学习已{'启用' if value == 'on' else '停用'}。",
+        )
+
+    async def _handle_group_wake_words_command(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ):
+        if not await self._require_group_admin(update, context):
+            return
+        words = [word.strip() for arg in context.args for word in arg.split(",")]
+        words = [word for word in words if word]
+        if not words:
+            current = (
+                ", ".join(self.group_chat_service.wake_words(update.effective_chat.id))
+                or "（无）"
+            )
+            await self._reply(update, context, f"当前唤醒词：{current}")
+            return
+        self.group_chat_service.set_wake_words(update.effective_chat.id, words)
+        await self._reply(update, context, "当前群唤醒词已更新。")
+
+    @staticmethod
+    def _member_status(member) -> str:
+        status = getattr(member, "status", "")
+        return str(getattr(status, "value", status)).lower()
+
+    async def _handle_my_chat_member(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        event = update.my_chat_member
+        if not event or not update.effective_chat:
+            return
+        old_status = self._member_status(event.old_chat_member)
+        new_status = self._member_status(event.new_chat_member)
+        logger.bind(
+            chat_id=update.effective_chat.id,
+            old_status=old_status,
+            new_status=new_status,
+        ).info("bot_chat_member_changed")
+        joined = old_status in {"left", "kicked"} and new_status in {
+            "member",
+            "administrator",
+        }
+        promoted = old_status == "member" and new_status == "administrator"
+        removed = new_status in {"left", "kicked"}
+        if removed:
+            return
+        if joined:
+            try:
+                await context.bot.send_message(
+                    chat_id=update.effective_chat.id,
+                    text=(
+                        "已加入群聊。\n\n"
+                        "默认仅在 @提及、回复机器人或使用唤醒词时响应。\n"
+                        "管理员可使用 /group_status 查看当前配置。"
+                    ),
+                )
+            except Exception as exc:
+                logger.warning(
+                    "发送入群说明失败 chat_id={} error={}",
+                    update.effective_chat.id,
+                    exc,
+                )
+        elif promoted:
+            logger.info("机器人已在群 {} 被提升为管理员", update.effective_chat.id)
+
+    async def _handle_chat_member(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        event = update.chat_member
+        if not event:
+            return
+        logger.bind(
+            chat_id=update.effective_chat.id if update.effective_chat else None,
+            user_id=getattr(event.new_chat_member.user, "id", None),
+            old_status=self._member_status(event.old_chat_member),
+            new_status=self._member_status(event.new_chat_member),
+        ).debug("chat_member_changed")
 
     # 消息处理方法
     async def _handle_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -725,8 +996,8 @@ class AL1SBot:
 
         try:
             if update and update.message:
-                await update.message.reply_text(
-                    "抱歉，处理您的请求时发生了错误，请稍后再试。"
+                await self._reply(
+                    update, context, "抱歉，处理您的请求时发生了错误，请稍后再试。"
                 )
         except Exception as e:
             logger.error(f"发送错误消息失败: {e}")
@@ -767,7 +1038,6 @@ class AL1SBot:
         return {
             "status": "running" if self.application else "stopped",
             "config": {
-                "openai_model": self.config.openai.model,
                 "openai_model": self.config.openai.model,
                 "telegram_bot": (
                     self.config.telegram.bot_token[:10] + "..."

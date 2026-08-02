@@ -5,9 +5,9 @@
 import os
 import tomllib
 from pathlib import Path
-from typing import Optional
+from typing import Literal, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 class OpenAIConfig(BaseModel):
@@ -21,12 +21,66 @@ class OpenAIConfig(BaseModel):
     timeout: int = Field(60, description="API超时时间（秒）")
 
 
+class GroupMemoryConfig(BaseModel):
+    """群聊长期记忆配置。"""
+
+    enable_long_term_learning: bool = False
+    allow_admin_toggle: bool = True
+    namespace_scope: Literal["group", "topic"] = "topic"
+
+
+class TelegramGroupConfig(BaseModel):
+    """Telegram 群聊策略配置。"""
+
+    enabled: bool = True
+    require_mention: bool = True
+    allow_reply_trigger: bool = True
+    observe_unmentioned_messages: bool = True
+    ignore_bot_messages: bool = True
+    session_scope: Literal["per_user", "shared", "topic"] = "topic"
+    allowed_chat_ids: list[int] = Field(default_factory=list)
+    blocked_chat_ids: list[int] = Field(default_factory=list)
+    allowed_thread_ids: list[int] = Field(default_factory=list)
+    ignored_thread_ids: list[int] = Field(default_factory=list)
+    wake_words: list[str] = Field(default_factory=lambda: ["爱丽丝", "AL1S"])
+    context_buffer_size: int = Field(30, ge=1, le=500)
+    context_buffer_ttl: int = Field(1800, ge=1, le=86400)
+    memory: GroupMemoryConfig = Field(default_factory=GroupMemoryConfig)
+
+    @field_validator("wake_words")
+    @classmethod
+    def validate_wake_words(cls, value: list[str]) -> list[str]:
+        """去除空值和重复项，避免空字符串匹配所有消息。"""
+        result: list[str] = []
+        seen: set[str] = set()
+        for word in value:
+            normalized = word.strip()
+            folded = normalized.casefold()
+            if normalized and folded not in seen:
+                result.append(normalized)
+                seen.add(folded)
+        return result
+
+
+class TelegramRateLimitConfig(BaseModel):
+    """Telegram 请求限流配置。"""
+
+    enabled: bool = True
+    per_user_requests: int = Field(10, ge=1, le=10000)
+    per_user_window_seconds: int = Field(60, ge=1, le=86400)
+    per_chat_requests: int = Field(30, ge=1, le=100000)
+    per_chat_window_seconds: int = Field(60, ge=1, le=86400)
+
+
 class TelegramConfig(BaseModel):
     """Telegram配置"""
 
     bot_token: str = Field("", description="Telegram机器人token")
     webhook_url: Optional[str] = Field("", description="Webhook URL（可选）")
     webhook_port: int = Field(8443, description="Webhook端口")
+    admin_user_ids: list[int] = Field(default_factory=list)
+    group: TelegramGroupConfig = Field(default_factory=TelegramGroupConfig)
+    rate_limit: TelegramRateLimitConfig = Field(default_factory=TelegramRateLimitConfig)
 
 
 class Ascii2DConfig(BaseModel):
@@ -101,6 +155,7 @@ class AgentConfig(BaseModel):
 
 class LangChainConfig(BaseModel):
     """LangChain 特定配置"""
+
     # enabled 属性由 agent.type 自动控制，不再作为配置项
     vector_store: str = Field("faiss", description="向量存储类型: memory | faiss")
     embedding: str = Field(
@@ -114,9 +169,11 @@ class LangChainConfig(BaseModel):
     retriever_k: int = Field(5, description="检索topK")
     chunk_size: int = Field(1000, description="文本分块大小")
     chunk_overlap: int = Field(200, description="文本分块重叠")
-    
+
     # 动态属性，由配置验证时设置
-    enabled: bool = Field(default=False, description="是否启用（由 agent.type 自动控制）")
+    enabled: bool = Field(
+        default=False, description="是否启用（由 agent.type 自动控制）"
+    )
 
 
 class AppConfig:

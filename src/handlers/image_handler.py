@@ -9,10 +9,12 @@ from loguru import logger
 from telegram import Update
 from telegram.ext import ContextTypes
 
+from ..agents.unified_agent import EnhancedUnifiedAgentService as UnifiedAgentService
 from ..models import ImageSearchResult, Message
 from ..services.ascii2d_service import Ascii2DService
 from ..services.conversation_service import ConversationService
-from ..agents.unified_agent import EnhancedUnifiedAgentService as UnifiedAgentService
+from ..services.group_chat_service import GroupChatService
+from ..services.rate_limit_service import RateLimitService
 from .base_handler import BaseHandler
 
 
@@ -24,11 +26,65 @@ class ImageHandler(BaseHandler):
         ascii2d_service: Ascii2DService,
         unified_agent_service: UnifiedAgentService,
         conversation_service: ConversationService,
+        group_chat_service: GroupChatService = None,
+        rate_limit_service: RateLimitService = None,
     ):
         super().__init__("ImageHandler", "处理图片消息和图片搜索")
         self.ascii2d_service = ascii2d_service
         self.unified_agent_service = unified_agent_service
         self.conversation_service = conversation_service
+        self.group_chat_service = group_chat_service
+        self.rate_limit_service = rate_limit_service
+
+    async def _reply(self, update: Update, *args, **kwargs):
+        kwargs.setdefault(
+            "message_thread_id",
+            getattr(update.effective_message, "message_thread_id", None),
+        )
+        try:
+            return await update.effective_message.reply_text(*args, **kwargs)
+        except Exception as exc:
+            logger.warning("图片引用回复失败，回退为 Topic 普通消息: {}", exc)
+            return await update.get_bot().send_message(
+                update.effective_chat.id, *args, **kwargs
+            )
+
+    async def _replace_placeholder(
+        self,
+        update: Update,
+        context: ContextTypes.DEFAULT_TYPE,
+        message_id: int,
+        text: str,
+    ) -> None:
+        try:
+            await context.bot.edit_message_text(
+                chat_id=update.effective_chat.id,
+                message_id=message_id,
+                text=text,
+                parse_mode="HTML",
+            )
+        except Exception as html_error:
+            logger.warning("图片回复 HTML 编辑失败，回退纯文本: {}", html_error)
+            import re
+
+            plain_text = re.sub(r"<[^>]+>", "", text)
+            try:
+                await context.bot.edit_message_text(
+                    chat_id=update.effective_chat.id,
+                    message_id=message_id,
+                    text=plain_text,
+                )
+            except Exception as edit_error:
+                logger.warning(
+                    "图片占位消息编辑失败，回退 Topic 新消息: {}", edit_error
+                )
+                await context.bot.send_message(
+                    chat_id=update.effective_chat.id,
+                    text=plain_text,
+                    message_thread_id=getattr(
+                        update.effective_message, "message_thread_id", None
+                    ),
+                )
 
     def can_handle(self, update: Update) -> bool:
         """检查是否可以处理此更新"""
@@ -139,8 +195,8 @@ class ImageHandler(BaseHandler):
         """发送格式化的响应"""
         try:
             # 发送消息，启用HTML解析
-            await update.message.reply_text(
-                text, parse_mode="HTML", disable_web_page_preview=True
+            await self._reply(
+                update, text, parse_mode="HTML", disable_web_page_preview=True
             )
 
         except Exception as e:
@@ -151,14 +207,68 @@ class ImageHandler(BaseHandler):
                 import re
 
                 clean_text = re.sub(r"<[^>]+>", "", text)
-                await update.message.reply_text(clean_text)
+                await self._reply(update, clean_text)
             except Exception as e2:
                 logger.error(f"发送纯文本也失败: {e2}")
-                await update.message.reply_text("抱歉，消息发送失败，请稍后再试。")
+                await self._reply(update, "抱歉，消息发送失败，请稍后再试。")
 
     async def handle(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
         """处理图片消息"""
         try:
+            if (
+                self.group_chat_service
+                and await self.group_chat_service.is_duplicate_update(
+                    getattr(update, "update_id", None)
+                )
+            ):
+                return True
+            bot_username = getattr(context.bot, "username", None)
+            bot_id = getattr(context.bot, "id", None)
+            if not bot_username or not bot_id:
+                me = await context.bot.get_me()
+                bot_username, bot_id = me.username or "", me.id
+            if self.group_chat_service:
+                decision = self.group_chat_service.decide(
+                    update, str(bot_username), int(bot_id)
+                )
+                if not decision.allowed:
+                    if decision.denied_reason == "not_triggered":
+                        await self.group_chat_service.observe(update)
+                    logger.bind(
+                        chat_id=update.effective_chat.id,
+                        thread_id=getattr(
+                            update.effective_message, "message_thread_id", None
+                        )
+                        or 0,
+                        user_id=update.effective_user.id,
+                        message_id=update.effective_message.message_id,
+                        trigger_type=getattr(
+                            decision.trigger_type, "value", decision.trigger_type
+                        ),
+                    ).info(
+                        "group_image_decision allowed=false denied_reason={} agent_called=false",
+                        decision.denied_reason,
+                    )
+                    return True
+                session_key = self.group_chat_service.session_key(update)
+            else:
+                from ..models import SessionKey
+
+                session_key = SessionKey(
+                    update.effective_chat.id, 0, update.effective_user.id, "private"
+                )
+
+            if self.rate_limit_service:
+                rate = await self.rate_limit_service.check(
+                    update.effective_user.id,
+                    session_key.chat_id,
+                    session_key.thread_id,
+                )
+                if not rate.allowed:
+                    if rate.notify:
+                        await self._reply(update, "请求过于频繁，请稍后再试。")
+                    return True
+
             # 提取消息信息
             message_info = self.extract_message_info(update)
             if not message_info:
@@ -166,91 +276,72 @@ class ImageHandler(BaseHandler):
                 return False
 
             user_id = message_info["user_id"]
-            chat_id = message_info["chat_id"]
             message = message_info["message"]
 
-            # 获取或创建对话
-            conversation = self.conversation_service.get_conversation(
-                user_id=user_id, chat_id=chat_id
-            )
+            conversation = self.conversation_service.get_conversation(session_key)
 
             # 获取当前角色
             role = conversation.role
             if not role:
                 # 如果没有设置角色，使用默认角色
-                role = self.conversation_service.get_role(user_id, chat_id)
+                role = self.conversation_service.get_role(session_key)
                 if not role:
                     # 如果还是没有角色，创建一个默认角色
                     default_role_name = "AI助手"
-                    self.conversation_service.set_role(
-                        user_id, chat_id, default_role_name
-                    )
-                    role = self.conversation_service.get_role(user_id, chat_id)
-
-            # 添加用户消息到对话
-            self.conversation_service.add_message(
-                user_id=user_id, chat_id=chat_id, message=message
-            )
+                    self.conversation_service.set_role(session_key, default_role_name)
+                    role = self.conversation_service.get_role(session_key)
 
             # 先发送个性化占位信息
             placeholder_text = self._get_image_placeholder_message(role)
-            placeholder_message = await context.bot.send_message(
-                chat_id=update.effective_chat.id,
-                text=placeholder_text,
-                reply_to_message_id=update.message.message_id,
-            )
+            placeholder_message = await self._reply(update, placeholder_text)
 
             try:
-                # 获取图片文件
-                photo_file = update.message.photo[-1]  # 获取最高分辨率的图片
-                image_data = await photo_file.download_as_bytearray()
+                async with self.conversation_service.session_lock(session_key):
+                    self.conversation_service.add_message(session_key, message)
+                    photo_file = await self._get_photo_file(update)
+                    if photo_file is None:
+                        raise ValueError("无法读取图片文件")
+                    image_data = await photo_file.download_as_bytearray()
 
-                # 转换为bytes
-                image_bytes = bytes(image_data)
+                    image_bytes = bytes(image_data)
 
-                # 分析图片
-                analysis_result = await self.unified_agent_service.analyze_image(
-                    image_bytes
-                )
+                    analysis_result = await self.unified_agent_service.analyze_image(
+                        image_bytes
+                    )
 
-                # 搜索图片来源
-                search_results = await self.ascii2d_service.search_by_image_file(
-                    image_bytes
-                )
+                    search_results = await self.ascii2d_service.search_by_image_file(
+                        image_bytes
+                    )
 
-                # 格式化响应
-                formatted_response = self._format_image_analysis(
-                    analysis_result, search_results, role
-                )
+                    formatted_response = self._format_image_analysis(
+                        analysis_result, search_results, role
+                    )
 
-                # 编辑占位信息，替换为实际响应
-                await context.bot.edit_message_text(
-                    chat_id=update.effective_chat.id,
-                    message_id=placeholder_message.message_id,
-                    text=formatted_response,
-                    parse_mode="HTML",
-                )
+                    await self._replace_placeholder(
+                        update,
+                        context,
+                        placeholder_message.message_id,
+                        formatted_response,
+                    )
 
-                # 添加机器人响应到对话
-                bot_message = Message(
-                    role="assistant",
-                    content=f"图片分析：{analysis_result}\n\n图片来源搜索：{len(search_results)} 个结果",
-                    timestamp=time.time(),
-                )
-                self.conversation_service.add_message(
-                    user_id=user_id, chat_id=chat_id, message=bot_message
-                )
+                    bot_message = Message(
+                        role="assistant",
+                        content=f"图片分析：{analysis_result}\n\n图片来源搜索：{len(search_results)} 个结果",
+                        timestamp=time.time(),
+                    )
+                    self.conversation_service.add_message(session_key, bot_message)
 
                 logger.info(f"成功处理用户 {user_id} 的图片")
                 return True
 
             except Exception as e:
                 # 如果图片处理失败，编辑占位信息为错误消息
-                error_message = f"❌ 处理图片时出现错误：{str(e)}"
-                await context.bot.edit_message_text(
-                    chat_id=update.effective_chat.id,
-                    message_id=placeholder_message.message_id,
-                    text=error_message,
+                error_message = "❌ 处理图片时出现错误，请稍后重试。"
+                await self._replace_placeholder(
+                    update,
+                    context,
+                    placeholder_message.message_id,
+                    error_message,
                 )
                 logger.error(f"图片处理失败: {e}")
                 return False
@@ -259,11 +350,7 @@ class ImageHandler(BaseHandler):
             logger.error(f"处理图片消息失败: {e}")
             # 尝试发送错误消息
             try:
-                await context.bot.send_message(
-                    chat_id=update.effective_chat.id,
-                    text="❌ 处理图片时出现错误，请稍后重试。",
-                    reply_to_message_id=update.message.message_id,
-                )
+                await self._reply(update, "❌ 处理图片时出现错误，请稍后重试。")
             except Exception as send_error:
                 logger.error(f"发送错误消息失败: {send_error}")
             return False
@@ -363,12 +450,14 @@ class ImageHandler(BaseHandler):
         try:
             # 验证URL
             if not self.ascii2d_service.validate_image_url(image_url):
-                await update.message.reply_text("❌ 无效的图片URL")
+                await self._reply(update, "❌ 无效的图片URL")
                 return False
 
             # 发送"正在搜索"状态
             await context.bot.send_chat_action(
-                chat_id=update.message.chat_id, action="typing"
+                chat_id=update.message.chat_id,
+                action="typing",
+                message_thread_id=getattr(update.message, "message_thread_id", None),
             )
 
             # 搜索相似图片（不再需要异步上下文管理器）
@@ -382,12 +471,12 @@ class ImageHandler(BaseHandler):
             else:
                 reply_text = "❌ 未找到相似图片"
 
-            await update.message.reply_text(reply_text)
+            await self._reply(update, reply_text)
             return True
 
         except Exception as e:
             logger.error(f"URL图片搜索失败: {e}")
-            await update.message.reply_text("抱歉，图片搜索失败，请稍后再试。")
+            await self._reply(update, "抱歉，图片搜索失败，请稍后再试。")
             return False
 
     async def handle_multiple_engine_search(
@@ -401,7 +490,9 @@ class ImageHandler(BaseHandler):
         try:
             # 发送"正在搜索"状态
             await context.bot.send_chat_action(
-                chat_id=update.message.chat_id, action="typing"
+                chat_id=update.message.chat_id,
+                action="typing",
+                message_thread_id=getattr(update.message, "message_thread_id", None),
             )
 
             # 使用多个搜索引擎搜索
@@ -412,12 +503,12 @@ class ImageHandler(BaseHandler):
             # 构建多引擎搜索结果回复
             reply_text = self._build_multi_engine_reply(all_results)
 
-            await update.message.reply_text(reply_text)
+            await self._reply(update, reply_text)
             return True
 
         except Exception as e:
             logger.error(f"多引擎图片搜索失败: {e}")
-            await update.message.reply_text("抱歉，多引擎搜索失败，请稍后再试。")
+            await self._reply(update, "抱歉，多引擎搜索失败，请稍后再试。")
             return False
 
     def _build_multi_engine_reply(self, all_results: dict) -> str:

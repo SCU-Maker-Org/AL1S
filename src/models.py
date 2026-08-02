@@ -3,10 +3,47 @@
 """
 
 import time
+from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional
 
 from pydantic import BaseModel, Field
+
+SessionScope = Literal["private", "per_user", "shared", "topic"]
+
+
+@dataclass(frozen=True, slots=True)
+class SessionKey:
+    """可解释、可哈希的对话作用域键。"""
+
+    chat_id: int
+    thread_id: int
+    user_id: int
+    scope: SessionScope
+
+    @property
+    def owner_id(self) -> int:
+        """返回当前作用域的拥有者，群共享和 Topic 会话使用 0。"""
+        return self.user_id if self.scope in {"private", "per_user"} else 0
+
+    @property
+    def knowledge_namespace(self) -> str:
+        """返回长期知识隔离命名空间。"""
+        if self.scope == "private":
+            return f"private:{self.user_id}"
+        if self.scope == "topic":
+            return f"topic:{self.chat_id}:{self.thread_id}"
+        return f"group:{self.chat_id}"
+
+    @property
+    def label(self) -> str:
+        labels = {
+            "private": "私聊",
+            "per_user": "群内用户独立",
+            "shared": "群共享",
+            "topic": "Topic 共享",
+        }
+        return labels[self.scope]
 
 
 class Message(BaseModel):
@@ -35,6 +72,11 @@ class Conversation(BaseModel):
 
     user_id: int
     chat_id: int
+    thread_id: int = 0
+    session_scope: SessionScope = "private"
+    session_owner_id: int = 0
+    knowledge_namespace: str = ""
+    chat_type: str = "private"
     role: Optional[Role] = None
     messages: List[Message] = Field(default_factory=list)
     created_at: float = Field(default_factory=lambda: time.time())
@@ -101,6 +143,7 @@ class KnowledgeEntry:
         importance_score: float = 0.0,
         embedding_id: str = None,
         source_message_id: int = None,
+        knowledge_namespace: str = "",
         created_at=None,
     ):
         self.id = id
@@ -114,6 +157,7 @@ class KnowledgeEntry:
         self.importance_score = importance_score
         self.embedding_id = embedding_id
         self.source_message_id = source_message_id
+        self.knowledge_namespace = knowledge_namespace
         self.created_at = created_at or datetime.now()
 
     def to_dict(self):
@@ -130,5 +174,6 @@ class KnowledgeEntry:
             "importance_score": self.importance_score,
             "embedding_id": self.embedding_id,
             "source_message_id": self.source_message_id,
+            "knowledge_namespace": self.knowledge_namespace,
             "created_at": self.created_at.isoformat() if self.created_at else None,
         }

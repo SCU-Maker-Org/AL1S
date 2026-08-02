@@ -198,8 +198,6 @@ class LangChainAgentService:
                                 args = {"query": query}
 
                             # 在同步上下文中运行异步 MCP 调用
-                            import asyncio
-
                             try:
                                 loop = asyncio.get_running_loop()
                                 # 如果在事件循环中，使用 run_coroutine_threadsafe
@@ -236,7 +234,6 @@ class LangChainAgentService:
     def _search_knowledge_sync(self, query: str) -> str:
         """同步知识搜索（供 LangChain 工具使用）"""
         try:
-            import asyncio
             import concurrent.futures
 
             def run_async_in_thread():
@@ -287,10 +284,6 @@ class LangChainAgentService:
     def _scrape_webpage_sync(self, url: str) -> str:
         """同步网页抓取功能"""
         try:
-            import asyncio
-            import aiohttp
-            from bs4 import BeautifulSoup
-            
             # 在同步上下文中运行异步网页抓取
             try:
                 loop = asyncio.get_running_loop()
@@ -300,9 +293,9 @@ class LangChainAgentService:
                 result = future.result(timeout=30)
             except RuntimeError:
                 result = asyncio.run(self._scrape_webpage_async(url))
-            
+
             return result
-            
+
         except Exception as e:
             logger.error(f"网页抓取失败: {e}")
             return f"网页抓取失败: {str(e)}"
@@ -312,42 +305,48 @@ class LangChainAgentService:
         try:
             import aiohttp
             from bs4 import BeautifulSoup
-            
+
             # 验证URL格式
-            if not url.startswith(('http://', 'https://')):
-                url = 'https://' + url
-            
+            if not url.startswith(("http://", "https://")):
+                url = "https://" + url
+
             async with aiohttp.ClientSession(
                 timeout=aiohttp.ClientTimeout(total=30),
                 headers={
-                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
-                }
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+                },
             ) as session:
                 async with session.get(url) as response:
                     if response.status == 200:
                         html = await response.text()
-                        soup = BeautifulSoup(html, 'html.parser')
-                        
+                        soup = BeautifulSoup(html, "html.parser")
+
                         # 移除脚本和样式标签
-                        for script in soup(["script", "style", "nav", "footer", "header"]):
+                        for script in soup(
+                            ["script", "style", "nav", "footer", "header"]
+                        ):
                             script.decompose()
-                        
+
                         # 提取文本内容
                         text = soup.get_text()
-                        
+
                         # 清理文本
                         lines = (line.strip() for line in text.splitlines())
-                        chunks = (phrase.strip() for line in lines for phrase in line.split("  "))
-                        text = ' '.join(chunk for chunk in chunks if chunk)
-                        
+                        chunks = (
+                            phrase.strip()
+                            for line in lines
+                            for phrase in line.split("  ")
+                        )
+                        text = " ".join(chunk for chunk in chunks if chunk)
+
                         # 限制长度，避免返回过长的内容
                         if len(text) > 3000:
                             text = text[:3000] + "..."
-                        
+
                         return f"网页内容 ({url}):\n{text}"
                     else:
                         return f"无法访问网页 {url}，状态码: {response.status}"
-                        
+
         except Exception as e:
             logger.error(f"网页抓取失败: {e}")
             return f"网页抓取失败: {str(e)}"
@@ -357,9 +356,11 @@ class LangChainAgentService:
         try:
             from langchain.agents import AgentExecutor, create_openai_tools_agent
             from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
+
             # 使用新的内存管理方式，避免弃用警告
             try:
                 from langchain_community.memory import ConversationBufferWindowMemory
+
                 memory = ConversationBufferWindowMemory(
                     memory_key="chat_history",
                     return_messages=True,
@@ -368,9 +369,11 @@ class LangChainAgentService:
             except ImportError:
                 # 如果新版本不可用，使用旧版本但抑制警告
                 import warnings
+
                 with warnings.catch_warnings():
                     warnings.filterwarnings("ignore", category=DeprecationWarning)
                     from langchain.memory import ConversationBufferWindowMemory
+
                     memory = ConversationBufferWindowMemory(
                         memory_key="chat_history",
                         return_messages=True,
@@ -440,7 +443,11 @@ class LangChainAgentService:
         self._current_conversation_id = conversation_id
 
     async def chat_completion(
-        self, messages: List[Dict[str, str]], tools: List[Dict[str, Any]] = None
+        self,
+        messages: List[Dict[str, str]],
+        tools: List[Dict[str, Any]] = None,
+        knowledge_namespace: Optional[str] = None,
+        enable_rag: bool = True,
     ) -> Optional[str]:
         """聊天完成接口（与统一 Agent 服务兼容）"""
         try:
@@ -450,26 +457,44 @@ class LangChainAgentService:
 
             # 解析消息结构，构建完整上下文
             context_info = self._parse_message_context(messages)
-            
+
             if not context_info["current_user_message"]:
                 return "抱歉，无法从消息中提取用户问题。"
+
+            # 群聊不进入带全局检索工具的 Agent，避免跨群知识泄露。
+            if knowledge_namespace and knowledge_namespace.startswith(
+                ("group:", "topic:")
+            ):
+                simple = await self._simple_rag_response(
+                    context_info["current_user_message"],
+                    messages,
+                    context_info["system_message"],
+                    enable_rag=enable_rag,
+                    knowledge_namespace=knowledge_namespace,
+                )
+                return self._format_for_telegram(simple)
 
             # 如果有 Agent，使用 Agent 处理
             if self._agent:
                 try:
                     # 构建增强的输入，包含完整对话上下文
                     agent_input = self._build_agent_input_with_context(context_info)
-                    
+
                     # LangChain Agent 的记忆功能会自动处理对话历史
                     # 我们不需要手动更新记忆，Agent 会在执行过程中自动维护
-                    
+
                     response = await self._agent.ainvoke(agent_input)
-                    output_text = response.get("output", "抱歉，Agent 未能生成有效回答。")
+                    output_text = response.get(
+                        "output", "抱歉，Agent 未能生成有效回答。"
+                    )
 
                     # 如果Agent返回了迭代上限提示，进行应急总结
                     if isinstance(output_text, str) and any(
-                        kw in output_text.lower() for kw in [
-                            "agent stopped", "stopped due to max", "max iterations"
+                        kw in output_text.lower()
+                        for kw in [
+                            "agent stopped",
+                            "stopped due to max",
+                            "max iterations",
                         ]
                     ):
                         fallback = await self._analyze_with_collected_info(
@@ -484,27 +509,37 @@ class LangChainAgentService:
                 except Exception as e:
                     error_msg = str(e)
                     logger.warning(f"Agent 处理失败: {e}")
-                    
+
                     # 检查是否是迭代限制问题
-                    if any(keyword in error_msg.lower() for keyword in [
-                        "max iterations", "max_iterations", "agent stopped", "stopped due to max"
-                    ]):
+                    if any(
+                        keyword in error_msg.lower()
+                        for keyword in [
+                            "max iterations",
+                            "max_iterations",
+                            "agent stopped",
+                            "stopped due to max",
+                        ]
+                    ):
                         logger.info("检测到迭代限制，尝试基于已收集信息进行分析...")
                         return await self._analyze_with_collected_info(
-                            context_info["current_user_message"], 
-                            messages, 
+                            context_info["current_user_message"],
+                            messages,
                             context_info["system_message"],
-                            error_msg
+                            error_msg,
                         )
                     else:
                         # 其他错误，使用简化模式
                         return await self._simple_rag_response(
-                            context_info["current_user_message"], messages, context_info["system_message"]
+                            context_info["current_user_message"],
+                            messages,
+                            context_info["system_message"],
                         )
 
             # 简化模式：直接使用 LLM + 知识检索
             simple = await self._simple_rag_response(
-                context_info["current_user_message"], messages, context_info["system_message"]
+                context_info["current_user_message"],
+                messages,
+                context_info["system_message"],
             )
             return self._format_for_telegram(simple)
 
@@ -520,8 +555,8 @@ class LangChainAgentService:
         if not text or not isinstance(text, str):
             return text
 
-        import re
         import html as _html
+        import re
 
         converted = text
 
@@ -530,16 +565,29 @@ class LangChainAgentService:
             code = m.group(2) or ""
             return f"<pre>{_html.escape(code)}</pre>"
 
-        converted = re.sub(r"```([a-zA-Z0-9_+\-]*)\n([\s\S]*?)```", _codeblock_repl, converted)
+        converted = re.sub(
+            r"```([a-zA-Z0-9_+\-]*)\n([\s\S]*?)```", _codeblock_repl, converted
+        )
 
         # 行内代码 `code`
-        converted = re.sub(r"`([^`]+)`", lambda m: f"<code>{_html.escape(m.group(1))}</code>", converted)
+        converted = re.sub(
+            r"`([^`]+)`",
+            lambda m: f"<code>{_html.escape(m.group(1))}</code>",
+            converted,
+        )
 
         # 粗体/斜体/删除线
         converted = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", converted, flags=re.DOTALL)
         converted = re.sub(r"__(.+?)__", r"<b>\1</b>", converted, flags=re.DOTALL)
-        converted = re.sub(r"(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)", r"<i>\1</i>", converted, flags=re.DOTALL)
-        converted = re.sub(r"(?<!_)_(?!_)(.+?)(?<!_)_(?!_)", r"<i>\1</i>", converted, flags=re.DOTALL)
+        converted = re.sub(
+            r"(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)",
+            r"<i>\1</i>",
+            converted,
+            flags=re.DOTALL,
+        )
+        converted = re.sub(
+            r"(?<!_)_(?!_)(.+?)(?<!_)_(?!_)", r"<i>\1</i>", converted, flags=re.DOTALL
+        )
         converted = re.sub(r"~~(.+?)~~", r"<s>\1</s>", converted, flags=re.DOTALL)
 
         # 链接 [text](url)
@@ -547,7 +595,7 @@ class LangChainAgentService:
             label = m.group(1)
             url = m.group(2)
             if url.lower().startswith(("http://", "https://")):
-                return f"<a href=\"{_html.escape(url)}\">{_html.escape(label)}</a>"
+                return f'<a href="{_html.escape(url)}">{_html.escape(label)}</a>'
             return _html.escape(label)
 
         converted = re.sub(r"\[([^\]]+)\]\(([^)\s]+)\)", _link_repl, converted)
@@ -556,7 +604,9 @@ class LangChainAgentService:
         def _heading_repl(m):
             return f"<b>{_html.escape(m.group(2).strip())}</b>\n"
 
-        converted = re.sub(r"^(#{1,6})\s+(.*)$", _heading_repl, converted, flags=re.MULTILINE)
+        converted = re.sub(
+            r"^(#{1,6})\s+(.*)$", _heading_repl, converted, flags=re.MULTILINE
+        )
 
         # 列表项 -> 项符号
         converted = re.sub(r"^\s*[-\*]\s+", "• ", converted, flags=re.MULTILINE)
@@ -610,16 +660,16 @@ class LangChainAgentService:
         return self._sanitize_telegram_html(self._markdown_to_telegram_html(text))
 
     async def _analyze_with_collected_info(
-        self, 
-        user_message: str, 
-        messages: List[Dict[str, str]], 
+        self,
+        user_message: str,
+        messages: List[Dict[str, str]],
         system_message: str,
-        error_msg: str
+        error_msg: str,
     ) -> str:
         """基于已收集的信息进行分析，当达到迭代限制时使用"""
         try:
             logger.info("开始基于已收集信息进行分析...")
-            
+
             # 构建分析提示词
             analysis_prompt = f"""你是天童爱丽丝，一个智能助手。虽然工具调用达到了迭代限制，但请基于以下信息为用户提供有用的分析：
 
@@ -637,13 +687,13 @@ class LangChainAgentService:
             if self._llm:
                 try:
                     response = await self._llm.ainvoke(analysis_prompt)
-                    if hasattr(response, 'content'):
+                    if hasattr(response, "content"):
                         return response.content
                     else:
                         return str(response)
                 except Exception as e:
                     logger.error(f"LLM 分析失败: {e}")
-            
+
             # 如果 LLM 不可用，提供基础回答
             return f"""邦邦卡邦！抱歉，在处理你的问题时遇到了一些技术限制，无法完成完整的分析。
 
@@ -662,7 +712,7 @@ class LangChainAgentService:
 
         except Exception as e:
             logger.error(f"基于已收集信息分析失败: {e}")
-            return f"邦邦卡邦！抱歉，在处理你的问题时遇到了一些技术问题。请稍后再试，或者尝试用更简单的方式提问。✨"
+            return "邦邦卡邦！抱歉，在处理你的问题时遇到了一些技术问题。请稍后再试，或者尝试用更简单的方式提问。✨"
 
     def _parse_message_context(self, messages: List[Dict[str, str]]) -> Dict[str, Any]:
         """解析消息上下文，提取关键信息"""
@@ -673,75 +723,87 @@ class LangChainAgentService:
             "user_messages": [],
             "assistant_messages": [],
         }
-        
+
         for i, msg in enumerate(messages):
             role = msg.get("role", "")
             content = msg.get("content", "")
-            
+
             if role == "system":
                 context["system_message"] = content
             elif role == "user":
                 context["user_messages"].append({"index": i, "content": content})
                 # 最后一条用户消息是当前问题
-                if i == len(messages) - 1 or (i + 1 < len(messages) and messages[i + 1]["role"] != "user"):
+                if i == len(messages) - 1 or (
+                    i + 1 < len(messages) and messages[i + 1]["role"] != "user"
+                ):
                     context["current_user_message"] = content
             elif role == "assistant":
                 context["assistant_messages"].append({"index": i, "content": content})
-            
+
             # 保存完整对话历史（除了系统消息和当前用户消息）
-            if role != "system" and not (role == "user" and content == context["current_user_message"]):
+            if role != "system" and not (
+                role == "user" and content == context["current_user_message"]
+            ):
                 context["conversation_history"].append(msg)
-        
+
         return context
 
-    def _build_agent_input_with_context(self, context_info: Dict[str, Any]) -> Dict[str, str]:
+    def _build_agent_input_with_context(
+        self, context_info: Dict[str, Any]
+    ) -> Dict[str, str]:
         """构建包含完整上下文的 Agent 输入"""
         # 如果 Agent 有内置记忆功能，让它自己处理对话历史
-        if hasattr(self._agent, 'memory') and self._agent.memory:
+        if hasattr(self._agent, "memory") and self._agent.memory:
             # 只传递当前用户消息，让 Agent 的记忆系统处理历史
             enhanced_input = context_info["current_user_message"]
-            
+
             # 如果有角色设定，将其融入当前问题的上下文中
             if context_info["system_message"]:
                 enhanced_input = f"{context_info['current_user_message']}"
                 # 角色信息通过系统提示传递，不需要重复
-            
+
         else:
             # 如果没有内置记忆，手动构建上下文
             context_parts = []
-            
+
             # 添加角色设定
             if context_info["system_message"]:
                 context_parts.append(f"角色设定: {context_info['system_message']}")
-            
+
             # 添加对话历史摘要
             if context_info["conversation_history"]:
                 context_parts.append("对话历史:")
                 # 只保留最近的几轮对话，避免上下文过长
-                recent_history = context_info["conversation_history"][-6:]  # 最近3轮对话
+                recent_history = context_info["conversation_history"][
+                    -6:
+                ]  # 最近3轮对话
                 for msg in recent_history:
                     role_name = "用户" if msg["role"] == "user" else "助手"
-                    content = msg["content"][:200] + "..." if len(msg["content"]) > 200 else msg["content"]
+                    content = (
+                        msg["content"][:200] + "..."
+                        if len(msg["content"]) > 200
+                        else msg["content"]
+                    )
                     context_parts.append(f"{role_name}: {content}")
-            
+
             # 添加当前用户问题
             context_parts.append(f"当前问题: {context_info['current_user_message']}")
-            
+
             # 构建最终输入
             enhanced_input = "\n\n".join(context_parts)
-        
+
         return {"input": enhanced_input}
 
     def _update_agent_memory(self, context_info: Dict[str, Any]) -> None:
         """更新 Agent 记忆（如果支持）"""
         try:
-            if not hasattr(self._agent, 'memory') or not self._agent.memory:
+            if not hasattr(self._agent, "memory") or not self._agent.memory:
                 return
-            
+
             # 将对话历史成对添加到记忆中（用户-助手对）
             user_messages = context_info["user_messages"]
             assistant_messages = context_info["assistant_messages"]
-            
+
             # 找到用户-助手消息对
             conversation_pairs = []
             for user_msg in user_messages:
@@ -749,20 +811,18 @@ class LangChainAgentService:
                 # 查找对应的助手回复（在用户消息之后的第一个助手消息）
                 for assistant_msg in assistant_messages:
                     if assistant_msg["index"] > user_msg["index"]:
-                        conversation_pairs.append({
-                            "input": user_content,
-                            "output": assistant_msg["content"]
-                        })
+                        conversation_pairs.append(
+                            {"input": user_content, "output": assistant_msg["content"]}
+                        )
                         break
-            
+
             # 将完整的对话对添加到记忆中
             for pair in conversation_pairs:
                 if pair["input"] and pair["output"]:  # 确保都不为空
                     self._agent.memory.save_context(
-                        {"input": pair["input"]}, 
-                        {"output": pair["output"]}
+                        {"input": pair["input"]}, {"output": pair["output"]}
                     )
-                    
+
         except Exception as e:
             logger.warning(f"更新 Agent 记忆失败: {e}")
 
@@ -771,13 +831,19 @@ class LangChainAgentService:
         user_message: str,
         messages: List[Dict[str, str]],
         system_message: str = "",
+        enable_rag: bool = True,
+        knowledge_namespace: Optional[str] = None,
     ) -> str:
         """简化的 RAG 响应模式"""
         try:
             # 搜索相关知识
-            knowledge_results = await self.vector_service.search_knowledge(
-                user_message, top_k=3
-            )
+            knowledge_results = []
+            if enable_rag:
+                knowledge_results = await self.vector_service.search_knowledge(
+                    user_message,
+                    top_k=3,
+                    knowledge_namespace=knowledge_namespace,
+                )
 
             # 构建上下文
             context = ""
@@ -797,7 +863,9 @@ class LangChainAgentService:
 
             # 添加对话历史（除了最后一条用户消息）
             for msg in messages[:-1]:
-                if msg["role"] != "system" and msg.get("content", "").strip():  # 避免重复添加系统消息和空消息
+                if (
+                    msg["role"] != "system" and msg.get("content", "").strip()
+                ):  # 避免重复添加系统消息和空消息
                     enhanced_messages.append(msg)
 
             # 增强最后一条用户消息
@@ -815,7 +883,7 @@ class LangChainAgentService:
                 content = msg.get("content", "").strip()
                 if not content:  # 跳过空内容的消息
                     continue
-                    
+
                 if msg["role"] == "system":
                     langchain_messages.append(SystemMessage(content=content))
                 elif msg["role"] == "user":
@@ -879,32 +947,6 @@ class LangChainAgentService:
             logger.error(f"图片分析失败: {e}")
             return None
 
-    async def learn_from_conversation(
-        self,
-        user_message: str,
-        bot_response: str,
-        conversation_id: int,
-        user_id: int,
-        conversation_context: List[Dict[str, str]] = None,
-    ) -> int:
-        """从对话中学习（使用学习服务）"""
-        try:
-            if not self.learning_service:
-                logger.warning("学习服务未初始化")
-                return 0
-
-            return await self.learning_service.learn_from_conversation(
-                user_message,
-                bot_response,
-                conversation_id,
-                user_id,
-                conversation_context,
-            )
-
-        except Exception as e:
-            logger.error(f"从对话中学习失败: {e}")
-            return 0
-
     async def get_learning_statistics(self) -> Dict[str, Any]:
         """获取学习统计信息"""
         try:
@@ -935,12 +977,17 @@ class LangChainAgentService:
         bot_response: str,
         conversation_id: int = None,
         user_id: int = None,
+        knowledge_namespace: str = "",
     ):
         """从对话中学习（与统一 Agent 服务兼容）"""
         try:
             if self.learning_service:
                 await self.learning_service.learn_from_conversation(
-                    user_message, bot_response, conversation_id, user_id
+                    user_message,
+                    bot_response,
+                    conversation_id,
+                    user_id,
+                    knowledge_namespace=knowledge_namespace,
                 )
                 logger.info("LangChain Agent 完成对话学习")
             else:

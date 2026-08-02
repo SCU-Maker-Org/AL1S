@@ -10,6 +10,7 @@
 - **🔍 图片搜索**: 基于 Ascii2D 的图片反向搜索功能
 - **💾 持久存储**: SQLite 数据库存储对话历史和知识库
 - **🌐 多模型支持**: 兼容 OpenAI、月之暗面、DeepSeek 等 API
+- **👥 群聊与 Topic**: 支持提及、回复、唤醒词、白名单、会话隔离和群上下文旁听
 
 ## 🚀 快速开始
 
@@ -181,6 +182,74 @@ greeting = "角色问候语"
 farewell = "角色告别语"
 ```
 
+### Telegram 群聊
+
+先通过 BotFather 创建机器人并将其加入群组。Telegram 开启隐私模式时，机器人通常只能收到命令、对机器人的回复和明确提及；使用 BotFather 的 `/setprivacy` 关闭隐私模式，或将机器人设为群管理员后，Telegram 可能投递更多普通群消息。无论 Telegram 投递哪些消息，AL1S 都会在程序层再次执行触发过滤，未触发消息不会调用 Agent。
+
+```toml
+[telegram]
+admin_user_ids = [123456789]
+
+[telegram.group]
+enabled = true
+require_mention = true
+allow_reply_trigger = true
+observe_unmentioned_messages = true
+ignore_bot_messages = true
+session_scope = "topic" # per_user | shared | topic
+allowed_chat_ids = []   # 空数组表示不限制
+blocked_chat_ids = []
+allowed_thread_ids = []
+ignored_thread_ids = []
+wake_words = ["爱丽丝", "AL1S"]
+context_buffer_size = 30
+context_buffer_ttl = 1800
+
+[telegram.group.memory]
+enable_long_term_learning = false
+allow_admin_toggle = true
+namespace_scope = "topic" # group | topic
+
+[telegram.rate_limit]
+enabled = true
+per_user_requests = 10
+per_user_window_seconds = 60
+per_chat_requests = 30
+per_chat_window_seconds = 60
+```
+
+群内默认响应条件：`@bot_username`、回复机器人消息、命中唤醒词或使用目标为当前机器人的命令。`observe_unmentioned_messages = true` 只会把普通群消息放入按群和 Topic 隔离的内存缓冲，受数量和 TTL 限制；旁听内容不会直接调用模型、写入 SQLite 或进入个人长期知识。
+
+会话作用域：
+
+- `per_user`：同一群和 Topic 内按成员隔离。
+- `shared`：整个群共享会话，Topic 不隔离。
+- `topic`：同一 Forum Topic 共享会话，普通群使用 Topic ID `0`。
+
+管理员命令：
+
+- `/group_status`：查看群 ID、Topic ID、作用域、旁听和长期学习状态。
+- `/group_enable`、`/group_disable`：运行期启停当前群。
+- `/group_scope per_user|shared|topic`：修改当前群会话作用域。
+- `/group_memory on|off`：切换群知识学习；需允许管理员切换。
+- `/group_wake_words 词1 词2`：修改当前群唤醒词；不带参数时查看当前值。
+
+这些修改命令仅允许群创建者、群管理员或 `telegram.admin_user_ids` 中的全局管理员执行。运行期修改在机器人重启后恢复 TOML 配置；需要持久配置时请同步修改 `config.toml`。
+
+获取 `chat_id` 和 `message_thread_id`：先在目标群/Topic 发送消息，然后查看 `/group_status`。如果机器人尚不能响应，可临时查看结构化日志中的 `chat_id`、`thread_id`，或使用 Telegram Bot API 的 `getUpdates`。群 ID 通常是负数，必须按整数原样写入白名单。
+
+Forum Topic 的所有文本、图片、占位、错误和拆分回复都会携带原始 `message_thread_id`。`allowed_thread_ids` 是全局 Topic ID 列表；如果不同群存在相同 Topic ID，建议同时设置 `allowed_chat_ids`。
+
+### 群聊数据边界
+
+- 私聊知识使用 `private:{user_id}` 命名空间，保持现有自动学习行为。
+- 群聊默认关闭长期学习；旁听缓冲只存在内存中。
+- 开启群学习后使用 `group:{chat_id}` 或 `topic:{chat_id}:{message_thread_id}`，不会写入成员个人知识命名空间。
+- 群聊 RAG 检索按同一命名空间过滤；LangChain 模式下群聊使用隔离的简化 RAG 路径，避免全局检索工具跨群读取。
+- 请告知群成员机器人可能接收哪些消息，并按需要保持 BotFather 隐私模式开启。
+
+完整设计见 [`docs/group-chat-design.md`](docs/group-chat-design.md)。
+
 ## 🔧 高级功能
 
 ### 1. 智能学习系统
@@ -224,9 +293,8 @@ farewell = "角色告别语"
 
 3. **数据库问题**
    ```bash
-   # 重新初始化数据库
-   rm data/bot.db
-   sqlite3 data/bot.db < data/init_db.sql
+   # 查看当前迁移版本；启动时会自动幂等升级，不要删除 bot.db
+   sqlite3 data/bot.db "SELECT * FROM schema_migrations ORDER BY version;"
    ```
 
 4. **向量存储问题**
@@ -235,6 +303,18 @@ farewell = "角色告别语"
    rm -rf data/vector_store/*
    # 重启机器人会自动重建
    ```
+
+5. **群里不响应**
+   - 确认机器人已加入群，且 `[telegram.group].enabled = true`。
+   - 检查群/Topic 是否被白名单、黑名单或忽略列表拒绝。
+   - 开启隐私模式时请使用明确 `@机器人用户名`、回复或命令。
+   - `/command@OtherBot` 不会被 AL1S 处理；用户名匹配不区分大小写。
+   - Topic 已关闭、机器人没有发言权限或消息被删除时，检查 `logs/bot.log` 中的结构化拒绝原因。
+
+6. **旁听上下文为空**
+   - BotFather 隐私模式可能阻止 Telegram 投递普通群消息。
+   - 确认 `observe_unmentioned_messages = true`，且消息未超过 `context_buffer_ttl`。
+   - 缓冲按群和 Topic 隔离，不会从其他 Topic 读取。
 
 ### 性能优化
 

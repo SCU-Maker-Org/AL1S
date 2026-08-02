@@ -36,6 +36,37 @@ bot_token = "your-telegram-bot-token-here"
 webhook_url = ""
 # Webhook端口
 webhook_port = 8443
+# 可跨群执行管理员命令的 Telegram 用户 ID
+admin_user_ids = []
+
+[telegram.group]
+enabled = true
+require_mention = true
+allow_reply_trigger = true
+observe_unmentioned_messages = true
+ignore_bot_messages = true
+# per_user | shared | topic
+session_scope = "topic"
+allowed_chat_ids = []
+blocked_chat_ids = []
+allowed_thread_ids = []
+ignored_thread_ids = []
+wake_words = ["爱丽丝", "AL1S"]
+context_buffer_size = 30
+context_buffer_ttl = 1800
+
+[telegram.group.memory]
+enable_long_term_learning = false
+allow_admin_toggle = true
+# group | topic
+namespace_scope = "topic"
+
+[telegram.rate_limit]
+enabled = true
+per_user_requests = 10
+per_user_window_seconds = 60
+per_chat_requests = 30
+per_chat_window_seconds = 60
 
 # ====================
 # Agent 配置 (核心配置)

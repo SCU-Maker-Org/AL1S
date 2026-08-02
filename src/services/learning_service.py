@@ -312,6 +312,7 @@ class LearningService:
         conversation_id: int,
         user_id: int,
         conversation_context: List[Dict[str, str]] = None,
+        knowledge_namespace: str = "",
     ) -> int:
         """从对话中学习知识"""
         try:
@@ -333,6 +334,7 @@ class LearningService:
             for entry in knowledge_entries:
                 entry.user_id = user_id
                 entry.conversation_id = conversation_id
+                entry.knowledge_namespace = knowledge_namespace
 
                 # 检查重复性
                 if await self._is_duplicate_knowledge(entry):
@@ -434,6 +436,7 @@ class LearningService:
                 entry.title + " " + entry.content,
                 top_k=3,
                 threshold=0.8,  # 高相似度阈值
+                knowledge_namespace=entry.knowledge_namespace or None,
             )
 
             for similar in similar_knowledge:
@@ -495,6 +498,7 @@ class LearningService:
                 entry.category,
                 entry.importance_score,
                 entry.source_message_id,
+                entry.knowledge_namespace,
             )
 
             if entry_id:

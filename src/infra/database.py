@@ -11,7 +11,7 @@ from typing import Any, Dict, List, Optional
 
 from loguru import logger
 
-from ..models import Message, Role
+from ..models import Message, SessionKey
 
 
 class DatabaseService:
@@ -26,7 +26,106 @@ class DatabaseService:
             logger.warning(f"数据库文件不存在: {self.db_path}")
             self._initialize_database()
 
+        self._migrate_database()
+
         logger.info(f"数据库服务初始化完成: {self.db_path}")
+
+    def _migrate_database(self) -> None:
+        """幂等升级旧数据库，并保留已有私聊对话和消息外键。"""
+        try:
+            with self.get_connection() as conn:
+                conn.execute(
+                    """CREATE TABLE IF NOT EXISTS schema_migrations (
+                           version INTEGER PRIMARY KEY,
+                           applied_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                       )"""
+                )
+                applied = conn.execute(
+                    "SELECT 1 FROM schema_migrations WHERE version = 2"
+                ).fetchone()
+                if applied:
+                    return
+
+                columns = {
+                    row["name"]
+                    for row in conn.execute(
+                        "PRAGMA table_info(conversations)"
+                    ).fetchall()
+                }
+                if "session_scope" not in columns:
+                    conn.commit()
+                    conn.execute("PRAGMA foreign_keys = OFF")
+                    conn.executescript(
+                        """
+                        BEGIN IMMEDIATE;
+                        CREATE TABLE conversations_v2 (
+                            id INTEGER PRIMARY KEY AUTOINCREMENT,
+                            user_id INTEGER NOT NULL,
+                            chat_id INTEGER NOT NULL,
+                            thread_id INTEGER NOT NULL DEFAULT 0,
+                            session_scope TEXT NOT NULL DEFAULT 'private',
+                            session_owner_id INTEGER NOT NULL DEFAULT 0,
+                            knowledge_namespace TEXT NOT NULL DEFAULT '',
+                            chat_type TEXT NOT NULL DEFAULT 'private',
+                            role_name TEXT DEFAULT 'AI助手',
+                            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                            FOREIGN KEY (user_id) REFERENCES users (id),
+                            UNIQUE(chat_id, thread_id, session_scope, session_owner_id)
+                        );
+                        INSERT INTO conversations_v2 (
+                            id, user_id, chat_id, thread_id, session_scope,
+                            session_owner_id, knowledge_namespace, chat_type,
+                            role_name, created_at, updated_at
+                        )
+                        SELECT c.id, c.user_id, c.chat_id, 0, 'private',
+                               u.telegram_user_id,
+                               'private:' || u.telegram_user_id,
+                               'private', c.role_name, c.created_at, c.updated_at
+                        FROM conversations c
+                        JOIN users u ON u.id = c.user_id;
+                        DROP TABLE conversations;
+                        ALTER TABLE conversations_v2 RENAME TO conversations;
+                        CREATE INDEX IF NOT EXISTS idx_conversations_user_chat
+                            ON conversations(user_id, chat_id);
+                        CREATE INDEX IF NOT EXISTS idx_conversations_session
+                            ON conversations(chat_id, thread_id, session_scope, session_owner_id);
+                        COMMIT;
+                        """
+                    )
+                    conn.execute("PRAGMA foreign_keys = ON")
+
+                knowledge_columns = {
+                    row["name"]
+                    for row in conn.execute(
+                        "PRAGMA table_info(knowledge_entries)"
+                    ).fetchall()
+                }
+                if knowledge_columns and "knowledge_namespace" not in knowledge_columns:
+                    conn.execute(
+                        "ALTER TABLE knowledge_entries ADD COLUMN knowledge_namespace TEXT NOT NULL DEFAULT ''"
+                    )
+                    conn.execute(
+                        """UPDATE knowledge_entries
+                           SET knowledge_namespace = COALESCE(
+                               (SELECT c.knowledge_namespace
+                                  FROM conversations c
+                                 WHERE c.id = knowledge_entries.conversation_id),
+                               'private:' || user_id
+                           )
+                           WHERE knowledge_namespace = ''"""
+                    )
+                conn.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_knowledge_namespace ON knowledge_entries(knowledge_namespace)"
+                )
+                conn.execute(
+                    "INSERT OR IGNORE INTO schema_migrations(version) VALUES (2)"
+                )
+                conn.commit()
+                logger.info("数据库 schema v2 群聊会话迁移完成")
+        except Exception as exc:
+            logger.error("数据库迁移失败: {}", exc)
+            raise
 
     def _initialize_database(self):
         """初始化数据库（如果需要）"""
@@ -96,15 +195,27 @@ class DatabaseService:
             return None
 
     async def ensure_conversation(
-        self, user_id: int, chat_id: int, role_name: str = "AI助手"
-    ) -> int:
+        self,
+        user_id: int,
+        session_key: SessionKey,
+        role_name: str = "AI助手",
+        chat_type: str = "private",
+        knowledge_namespace: Optional[str] = None,
+    ) -> Optional[int]:
         """确保对话存在，返回对话ID"""
         try:
             with self.get_connection() as conn:
                 # 检查对话是否存在
                 cursor = conn.execute(
-                    "SELECT id FROM conversations WHERE user_id = ? AND chat_id = ?",
-                    (user_id, chat_id),
+                    """SELECT id FROM conversations
+                       WHERE chat_id = ? AND thread_id = ?
+                         AND session_scope = ? AND session_owner_id = ?""",
+                    (
+                        session_key.chat_id,
+                        session_key.thread_id,
+                        session_key.scope,
+                        session_key.owner_id,
+                    ),
                 )
                 conversation = cursor.fetchone()
 
@@ -113,19 +224,40 @@ class DatabaseService:
                     conn.execute(
                         """UPDATE conversations SET 
                            role_name = ?,
+                           knowledge_namespace = ?,
                            updated_at = CURRENT_TIMESTAMP
                            WHERE id = ?""",
-                        (role_name, conversation["id"]),
+                        (
+                            role_name,
+                            knowledge_namespace or session_key.knowledge_namespace,
+                            conversation["id"],
+                        ),
                     )
                     return conversation["id"]
                 else:
                     # 创建新对话
                     cursor = conn.execute(
-                        """INSERT INTO conversations (user_id, chat_id, role_name)
-                           VALUES (?, ?, ?)""",
-                        (user_id, chat_id, role_name),
+                        """INSERT INTO conversations (
+                               user_id, chat_id, thread_id, session_scope,
+                               session_owner_id, knowledge_namespace, chat_type, role_name
+                           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                        (
+                            user_id,
+                            session_key.chat_id,
+                            session_key.thread_id,
+                            session_key.scope,
+                            session_key.owner_id,
+                            knowledge_namespace or session_key.knowledge_namespace,
+                            chat_type,
+                            role_name,
+                        ),
                     )
-                    logger.info(f"创建新对话: user_id={user_id}, chat_id={chat_id}")
+                    logger.info(
+                        "创建持久对话 chat_id={} thread_id={} scope={}",
+                        session_key.chat_id,
+                        session_key.thread_id,
+                        session_key.scope,
+                    )
                     return cursor.lastrowid
 
         except Exception as e:
@@ -305,7 +437,7 @@ class DatabaseService:
         try:
             with self.get_connection() as conn:
                 cursor = conn.execute(
-                    """DELETE FROM messages 
+                    """DELETE FROM messages
                        WHERE timestamp < datetime('now', '-{} days')""".format(
                         days
                     )
@@ -324,8 +456,9 @@ class DatabaseService:
             with sqlite3.connect(self.db_path) as conn:
                 conn.row_factory = sqlite3.Row
                 cursor = conn.execute(
-                    """SELECT id, user_id, conversation_id, title, content, summary, 
-                              keywords, category, importance_score, created_at
+                    """SELECT id, user_id, conversation_id, title, content, summary,
+                              keywords, category, importance_score, knowledge_namespace,
+                              created_at
                        FROM knowledge_entries 
                        ORDER BY created_at DESC"""
                 )
@@ -343,6 +476,7 @@ class DatabaseService:
                             "keywords": row["keywords"],
                             "category": row["category"],
                             "importance_score": row["importance_score"],
+                            "knowledge_namespace": row["knowledge_namespace"],
                             "created_at": row["created_at"],
                         }
                     )
@@ -377,15 +511,17 @@ class DatabaseService:
         category: str = "general",
         importance_score: float = 0.5,
         source_message_id: int = None,
+        knowledge_namespace: str = "",
     ) -> Optional[int]:
         """保存知识条目"""
         try:
             with sqlite3.connect(self.db_path) as conn:
                 cursor = conn.execute(
                     """INSERT INTO knowledge_entries 
-                       (user_id, conversation_id, title, content, summary, keywords, 
-                        category, importance_score, source_message_id, created_at)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))""",
+                       (user_id, conversation_id, title, content, summary, keywords,
+                        category, importance_score, source_message_id,
+                        knowledge_namespace, created_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))""",
                     (
                         user_id,
                         conversation_id,
@@ -396,6 +532,7 @@ class DatabaseService:
                         category,
                         importance_score,
                         source_message_id,
+                        knowledge_namespace,
                     ),
                 )
                 entry_id = cursor.lastrowid

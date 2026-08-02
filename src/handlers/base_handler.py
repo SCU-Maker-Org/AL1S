@@ -69,7 +69,11 @@ class BaseHandler(ABC):
         try:
             if update.message:
                 # 提取消息文本，确保不为空
-                message_text = update.message.text or ""
+                message_text = update.message.text or update.message.caption or ""
+                if not message_text.strip() and (
+                    update.message.photo or update.message.document
+                ):
+                    message_text = "[图片]"
                 if not message_text.strip():
                     self.logger.warning(
                         f"收到空消息: user_id={update.effective_user.id if update.effective_user else 'unknown'}"

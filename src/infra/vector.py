@@ -328,6 +328,7 @@ class VectorService:
                 or store_file.with_suffix(".pkl").exists()
             ):
                 self.vector_store.load(str(store_file))
+                await self._hydrate_knowledge_namespaces()
                 logger.info("已加载现有向量存储")
                 return
 
@@ -341,6 +342,25 @@ class VectorService:
 
         except Exception as e:
             logger.error(f"加载现有数据失败: {e}")
+
+    async def _hydrate_knowledge_namespaces(self) -> None:
+        """为升级前的向量元数据补齐知识命名空间。"""
+        if not self.database_service or not self.vector_store:
+            return
+        entries = await asyncio.to_thread(
+            self.database_service.get_all_knowledge_entries
+        )
+        namespaces = {
+            entry.get("id"): entry.get("knowledge_namespace", "") for entry in entries
+        }
+        changed = False
+        for metadata in self.vector_store.metadata.values():
+            if not metadata.get("knowledge_namespace"):
+                metadata["knowledge_namespace"] = namespaces.get(metadata.get("id"), "")
+                changed = True
+        if changed:
+            store_file = self.vector_store_path / "vector_store"
+            self.vector_store.save(str(store_file))
 
     async def _rebuild_from_database(self):
         """从数据库重建向量存储"""
@@ -371,6 +391,7 @@ class VectorService:
                         "keywords": entry.get("keywords", ""),
                         "category": entry.get("category", "general"),
                         "importance_score": entry.get("importance_score", 0.0),
+                        "knowledge_namespace": entry.get("knowledge_namespace", ""),
                     }
                 )
 
@@ -421,7 +442,11 @@ class VectorService:
             return False
 
     async def search_knowledge(
-        self, query: str, top_k: int = 5, threshold: float = 0.1
+        self,
+        query: str,
+        top_k: int = 5,
+        threshold: float = 0.1,
+        knowledge_namespace: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
         """搜索相关知识"""
         try:
@@ -433,14 +458,26 @@ class VectorService:
             query_vector = await self.embedding_model.encode_single(query)
 
             # 搜索相似向量
-            results = await self.vector_store.search(query_vector, top_k, threshold)
+            search_size = (
+                top_k if knowledge_namespace is None else max(top_k * 10, top_k)
+            )
+            results = await self.vector_store.search(
+                query_vector, search_size, threshold
+            )
 
             # 格式化结果
             knowledge_results = []
             for idx, score, metadata in results:
+                if (
+                    knowledge_namespace is not None
+                    and metadata.get("knowledge_namespace", "") != knowledge_namespace
+                ):
+                    continue
                 result = metadata.copy()
                 result["similarity_score"] = score
                 knowledge_results.append(result)
+                if len(knowledge_results) >= top_k:
+                    break
 
             logger.debug(f"搜索到 {len(knowledge_results)} 个相关知识")
             return knowledge_results
