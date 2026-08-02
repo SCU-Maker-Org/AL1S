@@ -295,10 +295,10 @@ env = { TAVILY_API_KEY = "${TAVILY_API_KEY}" }
 
 #### Media MCP：图片和语音
 
-Media MCP 使用独立的 OpenAI 媒体密钥，不会复用 DeepSeek 等聊天端点。必须先提供有效的 `OPENAI_MEDIA_API_KEY`，否则机器人会跳过媒体服务器，不能实际生成图片或语音：
+Media MCP 使用阿里云百炼的 DashScope 原生 API，不会复用 DeepSeek 等聊天端点，也不会把 [Qwen-Image](https://help.aliyun.com/en/model-studio/qwen-image-api) 错接到 OpenAI compatible-mode。先创建中国（北京）区域的百炼 API Key，并提供 `DASHSCOPE_API_KEY`；密钥区域必须与 `base_url` 一致：
 
 ```bash
-export OPENAI_MEDIA_API_KEY="your-openai-api-key"
+export DASHSCOPE_API_KEY="your-dashscope-api-key"
 ```
 
 然后启用媒体功能，并保持 MCP 服务器为管理员级权限：
@@ -309,11 +309,11 @@ admin_user_ids = [123456789]
 
 [media]
 enabled = true
-api_key = "" # 留空时读取 OPENAI_MEDIA_API_KEY
-base_url = "https://api.openai.com/v1"
-image_model = "gpt-image-2"
-speech_model = "tts-1"
-speech_voice = "alloy"
+api_key = "" # 留空时读取 DASHSCOPE_API_KEY
+base_url = "https://dashscope.aliyuncs.com/api/v1"
+image_model = "qwen-image-2.0-pro"
+speech_model = "qwen-audio-3.0-tts-plus"
+speech_voice = "longanlingxin"
 output_dir = "data/media_outbox"
 
 [[mcp.servers]]
@@ -324,12 +324,14 @@ enabled = true
 access = "admin"
 read_only = false
 include_tools = ["generate_image", "synthesize_speech"]
-tool_timeout = 180
+tool_timeout = 240
 ```
 
-重启机器人后，`telegram.admin_user_ids` 中的管理员可以直接说“生成一张 PostgreSQL WAL 写入路径示意图，横向布局”，或“用语音读出这段故障复盘摘要”。Agent 会按需调用 `generate_image` 或 `synthesize_speech`。每次 Telegram update 都使用随机 nonce 和调用者绑定目录；机器人只接受受信 `media` server 的结果，并通过防符号链接的文件描述符复验路径、大小、MIME、TTL 和哈希，发送后立即清理。这不是 `/image` 或 `/voice` 固定命令；是否调用工具由 Agent 根据请求决定。
+`qwen-audio-3.0-tts-plus` 的 [HTTP 非实时语音接口](https://help.aliyun.com/en/model-studio/cosyvoice-tts-http-api) 当前仅支持中国（北京）区域。上面的旧域名仍受官方支持；已有百炼 Workspace 时，可以改成 `https://{WorkspaceId}.cn-beijing.maas.aliyuncs.com/api/v1`。默认 `longanlingxin` 是该模型支持的中英双语音色，其他可用音色见 [Qwen-Audio-TTS 音色表](https://www.alibabacloud.com/help/en/model-studio/qwen-audio-tts-voice-list)。
 
-语音消息默认带有“AI 生成语音”说明。图片提示词和待朗读文本会发送给 `[media].base_url` 对应的媒体服务商，并可能记录在本地工具调用日志中；不要用它处理秘密或不应外发的内容。
+重启机器人后，`telegram.admin_user_ids` 中的管理员可以直接说“生成一张 PostgreSQL WAL 写入路径示意图，横向布局”，或“用语音读出这段故障复盘摘要”。图片由 `qwen-image-2.0-pro` 生成 PNG；语音由 `qwen-audio-3.0-tts-plus` 生成 Opus，并继续作为 Telegram 语音消息发送。Agent 会按需调用 `generate_image` 或 `synthesize_speech`。每次 Telegram update 都使用随机 nonce 和调用者绑定目录；机器人只接受受信 `media` server 的结果，并通过防符号链接的文件描述符复验路径、大小、MIME、TTL 和哈希，发送后立即清理。这不是 `/image` 或 `/voice` 固定命令；是否调用工具由 Agent 根据请求决定。
+
+DashScope 会先返回短期有效的 OSS 下载地址；Media MCP 会立即下载，并逐跳检查 HTTPS、公网 DNS、重定向、Content-Type、实际字节数与 PNG/Opus 文件签名，且不会向 OSS 转发 API Key。语音消息默认带有“AI 生成语音”说明。图片提示词和待朗读文本会发送给 `[media].base_url` 对应的百炼区域，并可能记录在本地工具调用日志中；不要用它处理秘密或不应外发的内容。
 
 #### 高权限服务器
 

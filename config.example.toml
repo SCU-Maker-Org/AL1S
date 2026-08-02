@@ -119,15 +119,15 @@ max_document_bytes = 256000
 private_chat_only = true
 reject_secrets = true
 
-# 图片/TTS 使用独立媒体密钥，避免把不支持媒体的聊天模型端点误用为媒体端点。
-# 推荐通过环境变量 OPENAI_MEDIA_API_KEY 提供密钥。
+# 图片/TTS 使用百炼 DashScope 原生 API，不经过 OpenAI compatible-mode。
+# 推荐通过环境变量 DASHSCOPE_API_KEY 提供中国（北京）区域密钥。
 [media]
 enabled = false
 api_key = ""
-base_url = "https://api.openai.com/v1"
-image_model = "gpt-image-2"
-speech_model = "tts-1"
-speech_voice = "alloy"
+base_url = "https://dashscope.aliyuncs.com/api/v1"
+image_model = "qwen-image-2.0-pro"
+speech_model = "qwen-audio-3.0-tts-plus"
+speech_voice = "longanlingxin"
 output_dir = "data/media_outbox"
 max_artifact_bytes = 20000000
 retention_seconds = 3600
@@ -192,7 +192,7 @@ access = "admin"
 read_only = false
 include_tools = ["generate_image", "synthesize_speech"]
 connect_timeout = 60
-tool_timeout = 180
+tool_timeout = 240
 max_result_chars = 4000
 
 # 文件系统工具：请只开放必要目录

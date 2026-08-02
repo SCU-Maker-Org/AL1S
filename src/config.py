@@ -7,8 +7,27 @@ import re
 import tomllib
 from pathlib import Path
 from typing import Literal, Optional
+from urllib.parse import urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
+QWEN_AUDIO_MODEL_VOICES = {
+    "qwen-audio-3.0-tts-plus": {"longanlingxin", "longanlufeng"},
+    "qwen-audio-3.0-tts-flash": {
+        "longanfengyue",
+        "longanyuanfei",
+        "longanlingxi",
+        "longanxiaoxin",
+        "longanhuan_v3.6",
+        "longjielidou_v3.6",
+        "longpaopao_v3.6",
+        "longhuohuo_v3.6",
+        "longchuanshu_v3.6",
+        "loongmary",
+        "loongeva_v3.6",
+        "loongjohn",
+    },
+}
 
 
 class OpenAIConfig(BaseModel):
@@ -207,24 +226,64 @@ class ProfileConfig(BaseModel):
 
 
 class MediaConfig(BaseModel):
-    """本地 Media MCP 及 Telegram 媒体派发配置。"""
+    """Qwen Media MCP 及 Telegram 媒体派发配置。"""
 
     enabled: bool = False
     api_key: str = Field(
-        default_factory=lambda: os.getenv("OPENAI_MEDIA_API_KEY", ""), repr=False
+        default_factory=lambda: os.getenv("DASHSCOPE_API_KEY", ""), repr=False
     )
-    base_url: str = "https://api.openai.com/v1"
-    image_model: str = "gpt-image-2"
-    speech_model: str = "tts-1"
-    speech_voice: str = "alloy"
+    base_url: str = "https://dashscope.aliyuncs.com/api/v1"
+    image_model: str = "qwen-image-2.0-pro"
+    speech_model: str = "qwen-audio-3.0-tts-plus"
+    speech_voice: str = "longanlingxin"
     output_dir: str = "data/media_outbox"
     max_artifact_bytes: int = Field(20_000_000, ge=1024, le=50_000_000)
     retention_seconds: int = Field(3600, ge=60, le=604800)
 
+    @field_validator("base_url")
+    @classmethod
+    def validate_dashscope_base_url(cls, value: str) -> str:
+        try:
+            parsed = urlsplit(value)
+            port = parsed.port
+        except ValueError as exc:
+            raise ValueError("无效的 DashScope base_url") from exc
+        host = (parsed.hostname or "").lower()
+        workspace_host = bool(
+            re.fullmatch(
+                r"[a-z0-9][a-z0-9-]{1,126}\.(?:cn-beijing|ap-southeast-1)\.maas\.aliyuncs\.com",
+                host,
+            )
+        )
+        if (
+            parsed.scheme != "https"
+            or port not in (None, 443)
+            or parsed.username is not None
+            or parsed.password is not None
+            or (
+                host not in {"dashscope.aliyuncs.com", "dashscope-intl.aliyuncs.com"}
+                and not workspace_host
+            )
+            or parsed.path.rstrip("/") != "/api/v1"
+            or parsed.query
+            or parsed.fragment
+        ):
+            raise ValueError("media.base_url 必须是官方 DashScope HTTPS /api/v1 端点")
+        return value.rstrip("/")
+
     @model_validator(mode="after")
-    def resolve_media_api_key(self):
+    def validate_media_settings(self):
         if not self.api_key:
-            self.api_key = os.getenv("OPENAI_MEDIA_API_KEY", "")
+            self.api_key = os.getenv("DASHSCOPE_API_KEY", "")
+        if not self.image_model.startswith("qwen-image"):
+            raise ValueError("media.image_model 必须使用 Qwen-Image 模型")
+        allowed_voices = QWEN_AUDIO_MODEL_VOICES.get(self.speech_model)
+        if allowed_voices is None:
+            raise ValueError("media.speech_model 必须使用受支持的 Qwen-Audio-TTS 模型")
+        if self.speech_voice not in allowed_voices:
+            raise ValueError(
+                f"音色 {self.speech_voice} 不适用于模型 {self.speech_model}"
+            )
         return self
 
 

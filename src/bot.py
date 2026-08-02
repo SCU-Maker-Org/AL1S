@@ -217,14 +217,14 @@ class AL1SBot:
                     continue
                 if not self.config.media.api_key:
                     logger.warning(
-                        "Media MCP 缺少 OPENAI_MEDIA_API_KEY，跳过图片与语音工具"
+                        "Media MCP 缺少 DASHSCOPE_API_KEY，跳过图片与语音工具"
                     )
                     continue
                 media_server = configured_server.model_copy(deep=True)
                 media_server.env.update(
                     {
-                        "AL1S_MEDIA_OPENAI_API_KEY": self.config.media.api_key,
-                        "AL1S_MEDIA_OPENAI_BASE_URL": self.config.media.base_url,
+                        "AL1S_MEDIA_DASHSCOPE_API_KEY": self.config.media.api_key,
+                        "AL1S_MEDIA_DASHSCOPE_BASE_URL": self.config.media.base_url,
                         "AL1S_MEDIA_IMAGE_MODEL": self.config.media.image_model,
                         "AL1S_MEDIA_TTS_MODEL": self.config.media.speech_model,
                         "AL1S_MEDIA_TTS_VOICE": self.config.media.speech_voice,
@@ -233,6 +233,9 @@ class AL1SBot:
                         ),
                         "AL1S_MEDIA_TTL_SECONDS": str(
                             self.config.media.retention_seconds
+                        ),
+                        "AL1S_MEDIA_MAX_ARTIFACT_BYTES": str(
+                            self.config.media.max_artifact_bytes
                         ),
                     }
                 )
