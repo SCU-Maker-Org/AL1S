@@ -3,8 +3,8 @@ FROM python:3.13-slim
 # 设置工作目录
 WORKDIR /app
 
-# 使用uv安装依赖到虚拟环境，添加重试机制
-ENV PATH="/app/venv/bin:$PATH"
+# 使用 uv 锁文件安装依赖
+ENV PATH="/app/.venv/bin:$PATH"
 
 # 复制项目文件
 COPY pyproject.toml ./
@@ -35,9 +35,8 @@ ENV PATH="/app/.venv/bin:/app/.npm-global/bin:$PATH"
 # 切换到非root用户
 USER botuser
 
-# 创建虚拟环境并安装依赖（以botuser身份）
-RUN uv venv ./venv \
-    && uv pip install --no-cache .
+# 严格按锁文件安装依赖（以botuser身份）
+RUN uv sync --frozen --no-dev --no-install-project
 
 COPY main.py ./
 COPY src/ ./src/

@@ -54,6 +54,14 @@ class ChatHandler(BaseHandler):
             and not update.message.text.startswith("!")
         )
 
+    @staticmethod
+    def _mcp_access_level(update: Update) -> str:
+        return MCPService.resolve_caller_access(
+            getattr(update.effective_user, "id", None),
+            getattr(update.effective_chat, "type", None),
+            config.telegram.admin_user_ids,
+        )
+
     def _build_system_prompt(self, role) -> str:
         """构建系统提示词"""
         html_instructions = """
@@ -612,12 +620,15 @@ class ChatHandler(BaseHandler):
                             {"role": msg.role, "content": msg.content.strip()}
                         )
                 if self.mcp_service:
-                    tools = self.mcp_service.get_tools_for_llm()
+                    tool_access = self._mcp_access_level(update)
+                    tools = self.mcp_service.get_tools_for_llm(tool_access)
                 else:
+                    tool_access = "public"
                     tools = []
                 call_kwargs = {
                     "messages": messages,
                     "tools": tools or None,
+                    "tool_access": tool_access,
                     "knowledge_namespace": (
                         self.group_chat_service.knowledge_namespace(session_key)
                         if self.group_chat_service

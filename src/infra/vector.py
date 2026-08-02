@@ -7,11 +7,14 @@
 
 import asyncio
 import json
+import os
 import pickle
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from loguru import logger
+
+os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 
 # 向量存储后端
 try:
@@ -46,21 +49,44 @@ from ..models import KnowledgeEntry
 class EmbeddingModel:
     """嵌入模型接口"""
 
-    def __init__(self, model_type: str = "tfidf", model_name: str = None):
+    DEFAULT_MODEL_NAME = "Qwen/Qwen3-Embedding-0.6B"
+
+    def __init__(
+        self,
+        model_type: str = DEFAULT_MODEL_NAME,
+        model_name: str = None,
+        revision: str = None,
+        device: str = "cpu",
+        batch_size: int = 8,
+    ):
         self.model_type = model_type
-        self.model_name = model_name or model_type
+        self.model_name = self._resolve_model_name(model_type, model_name)
+        self.model_revision = revision
+        self.device = device
+        self.batch_size = batch_size
         self.dimension = 0
         self.model = None
         self._fitted = False
+        self.normalized = True
+        self.query_prompt_name = None
+        self.query_prompt = None
 
         if model_type == "tfidf":
             self._init_tfidf_model()
-        elif model_type.startswith("sentence-transformers"):
-            self._init_sentence_transformer_model(
-                model_name or "paraphrase-multilingual-MiniLM-L12-v2"
-            )
         else:
-            raise ValueError(f"不支持的嵌入模型类型: {model_type}")
+            self._init_sentence_transformer_model(self.model_name)
+
+    @classmethod
+    def _resolve_model_name(cls, model_type: str, model_name: str = None) -> str:
+        if model_name:
+            return model_name
+        if model_type == "sentence-transformers":
+            return cls.DEFAULT_MODEL_NAME
+        prefix = "sentence-transformers/"
+        if model_type.startswith(prefix):
+            resolved = model_type[len(prefix) :]
+            return resolved or cls.DEFAULT_MODEL_NAME
+        return model_type
 
     def _init_tfidf_model(self):
         """初始化TF-IDF模型"""
@@ -72,7 +98,7 @@ class EmbeddingModel:
             stop_words=None,
             ngram_range=(1, 3),
             min_df=1,
-            max_df=0.8,
+            max_df=1.0,
             token_pattern=r"(?u)\b\w+\b",
             lowercase=True,
             sublinear_tf=True,
@@ -88,10 +114,25 @@ class EmbeddingModel:
                 "sentence-transformers 未安装，无法使用 Sentence Transformer 模型"
             )
 
-        self.model = SentenceTransformer(model_name)
+        model_kwargs = {}
+        if self.device != "auto":
+            model_kwargs["device"] = self.device
+        if self.model_revision:
+            model_kwargs["revision"] = self.model_revision
+
+        self.model = SentenceTransformer(model_name, **model_kwargs)
+        if not self.model_revision:
+            transformer_model = getattr(self.model, "transformers_model", None)
+            model_config = getattr(transformer_model, "config", None)
+            self.model_revision = getattr(model_config, "_commit_hash", None)
         self.dimension = self.model.get_sentence_embedding_dimension()
+        prompts = getattr(self.model, "prompts", {}) or {}
+        if "query" in prompts:
+            self.query_prompt_name = "query"
+            self.query_prompt = prompts["query"]
         logger.info(
-            f"初始化 Sentence Transformer 模型: {model_name}, 维度: {self.dimension}"
+            f"初始化 Sentence Transformer 模型: {model_name}, "
+            f"维度: {self.dimension}, 设备: {self.device}"
         )
 
     async def fit(self, texts: List[str]):
@@ -102,19 +143,41 @@ class EmbeddingModel:
         else:
             self._fitted = True
 
-    async def encode(self, texts: List[str]) -> List[List[float]]:
+    async def encode(
+        self, texts: List[str], *, is_query: bool = False
+    ) -> List[List[float]]:
         """编码文本列表"""
         if self.model_type == "tfidf":
             if not self._fitted:
                 raise ValueError("TF-IDF 模型需要先训练")
             vectors = await asyncio.to_thread(self.vectorizer.transform, texts)
-            return vectors.toarray().astype("float32")
-        else:
-            return await asyncio.to_thread(self.model.encode, texts)
+            vectors_array = vectors.toarray().astype("float32")
+            if vectors_array.shape[1] < self.dimension:
+                import numpy as np
 
-    async def encode_single(self, text: str) -> List[float]:
+                vectors_array = np.pad(
+                    vectors_array,
+                    ((0, 0), (0, self.dimension - vectors_array.shape[1])),
+                )
+            return vectors_array
+
+        encode_kwargs = {
+            "batch_size": self.batch_size,
+            "convert_to_numpy": True,
+            "normalize_embeddings": True,
+            "show_progress_bar": False,
+        }
+        if is_query and self.query_prompt_name:
+            encode_kwargs["prompt_name"] = self.query_prompt_name
+        vectors = await asyncio.to_thread(self.model.encode, texts, **encode_kwargs)
+
+        import numpy as np
+
+        return np.asarray(vectors, dtype="float32")
+
+    async def encode_single(self, text: str, *, is_query: bool = False) -> List[float]:
         """编码单个文本"""
-        vectors = await self.encode([text])
+        vectors = await self.encode([text], is_query=is_query)
         return vectors[0]
 
 
@@ -138,6 +201,14 @@ class VectorStore:
             logger.info("初始化内存向量存储")
         else:
             raise ValueError(f"不支持的向量存储后端: {self.backend}")
+
+    def reset(self):
+        """重置为空存储。"""
+        self.metadata = {}
+        if self.backend == "faiss":
+            self.index = faiss.IndexFlatIP(self.dimension)
+        elif self.backend == "memory":
+            self.vectors = []
 
     async def add_vectors(
         self, vectors: List[List[float]], metadata: List[Dict[str, Any]]
@@ -202,7 +273,7 @@ class VectorStore:
 
         return []
 
-    def save(self, file_path: str):
+    def save(self, file_path: str) -> bool:
         """保存向量存储"""
         try:
             if self.backend == "faiss":
@@ -216,58 +287,76 @@ class VectorStore:
                 json.dump(self.metadata, f, ensure_ascii=False, indent=2)
 
             logger.info(f"向量存储已保存到: {file_path}")
+            return True
         except Exception as e:
             logger.error(f"保存向量存储失败: {e}")
+            return False
 
-    def load(self, file_path: str):
+    def load(self, file_path: str) -> bool:
         """加载向量存储"""
         try:
+            loaded_index = None
+            loaded_vectors = None
             if self.backend == "faiss":
-                if Path(f"{file_path}.faiss").exists():
-                    loaded_index = faiss.read_index(f"{file_path}.faiss")
-
-                    # 检查维度兼容性
-                    if loaded_index.d != self.dimension:
-                        logger.warning(
-                            f"FAISS 索引维度不匹配: 现有 {loaded_index.d}, 期望 {self.dimension}"
-                        )
-                        logger.warning("将重新初始化空索引")
-                        # 保持原来的空索引，不加载不兼容的索引
-                    else:
-                        self.index = loaded_index
-                        logger.info(f"FAISS 索引加载成功，维度: {self.index.d}")
+                index_path = Path(f"{file_path}.faiss")
+                if not index_path.exists():
+                    return False
+                loaded_index = faiss.read_index(str(index_path))
+                if loaded_index.d != self.dimension:
+                    logger.warning(
+                        f"FAISS 索引维度不匹配: 现有 {loaded_index.d}, "
+                        f"期望 {self.dimension}"
+                    )
+                    self.reset()
+                    return False
             elif self.backend == "memory":
-                if Path(f"{file_path}.pkl").exists():
-                    with open(f"{file_path}.pkl", "rb") as f:
-                        self.vectors = pickle.load(f)
+                vector_path = Path(f"{file_path}.pkl")
+                if not vector_path.exists():
+                    return False
+                with open(vector_path, "rb") as f:
+                    loaded_vectors = pickle.load(f)
+                if any(len(vector) != self.dimension for vector in loaded_vectors):
+                    logger.warning("内存向量维度与当前模型不匹配")
+                    self.reset()
+                    return False
 
-            # 加载元数据（只有在索引兼容时才加载）
-            if (
-                self.backend == "faiss"
-                and hasattr(self, "index")
-                and self.index is not None
-            ):
-                metadata_file = f"{file_path}_metadata.json"
-                if Path(metadata_file).exists():
-                    with open(metadata_file, "r", encoding="utf-8") as f:
-                        # 转换键为整数
-                        loaded_metadata = json.load(f)
-                        self.metadata = {int(k): v for k, v in loaded_metadata.items()}
-                        logger.info(f"加载了 {len(self.metadata)} 个元数据条目")
-            elif self.backend == "memory":
-                metadata_file = f"{file_path}_metadata.json"
-                if Path(metadata_file).exists():
-                    with open(metadata_file, "r", encoding="utf-8") as f:
-                        loaded_metadata = json.load(f)
-                        self.metadata = {int(k): v for k, v in loaded_metadata.items()}
+            metadata_path = Path(f"{file_path}_metadata.json")
+            if not metadata_path.exists():
+                self.reset()
+                return False
+            with open(metadata_path, "r", encoding="utf-8") as f:
+                raw_metadata = json.load(f)
+            loaded_metadata = {int(k): v for k, v in raw_metadata.items()}
+
+            vector_count = (
+                loaded_index.ntotal if self.backend == "faiss" else len(loaded_vectors)
+            )
+            if set(loaded_metadata) != set(range(vector_count)):
+                logger.warning(
+                    f"向量与元数据数量或索引不一致: "
+                    f"vectors={vector_count}, metadata={len(loaded_metadata)}"
+                )
+                self.reset()
+                return False
+
+            if self.backend == "faiss":
+                self.index = loaded_index
+            else:
+                self.vectors = loaded_vectors
+            self.metadata = loaded_metadata
 
             logger.info(f"向量存储已从 {file_path} 加载")
+            return True
         except Exception as e:
+            self.reset()
             logger.error(f"加载向量存储失败: {e}")
+            return False
 
 
 class VectorService:
     """向量存储服务"""
+
+    INDEX_SCHEMA_VERSION = 3
 
     def __init__(
         self, database_service=None, vector_store_path: str = "data/vector_store"
@@ -282,12 +371,17 @@ class VectorService:
         self._initialized = False
 
     async def initialize(
-        self, embedding_model_type: str = "tfidf", vector_store_backend: str = "faiss"
+        self,
+        embedding_model_type: Optional[str] = None,
+        vector_store_backend: str = "faiss",
+        embedding_revision: Optional[str] = None,
+        embedding_device: str = "cpu",
+        embedding_batch_size: int = 8,
     ) -> bool:
         """初始化向量服务"""
         try:
             # 初始化嵌入模型 - 优先使用传入参数，否则从配置读取
-            if not embedding_model_type or embedding_model_type == "tfidf":
+            if not embedding_model_type:
                 # 尝试从新的配置结构读取
                 if hasattr(config, "agent") and hasattr(
                     config.agent, "embedding_model"
@@ -297,10 +391,15 @@ class VectorService:
                 elif hasattr(config, "rag") and hasattr(config.rag, "embedding_model"):
                     embedding_model_type = config.rag.embedding_model
                 else:
-                    embedding_model_type = "tfidf"  # 默认值
+                    embedding_model_type = EmbeddingModel.DEFAULT_MODEL_NAME
 
             logger.info(f"使用嵌入模型: {embedding_model_type}")
-            self.embedding_model = EmbeddingModel(embedding_model_type)
+            self.embedding_model = EmbeddingModel(
+                embedding_model_type,
+                revision=embedding_revision,
+                device=embedding_device,
+                batch_size=embedding_batch_size,
+            )
 
             # 初始化向量存储
             self.vector_store = VectorStore(
@@ -308,7 +407,8 @@ class VectorService:
             )
 
             # 加载现有数据
-            await self._load_existing_data()
+            if not await self._load_existing_data():
+                return False
 
             self._initialized = True
             logger.info("向量服务初始化完成")
@@ -318,7 +418,49 @@ class VectorService:
             logger.error(f"向量服务初始化失败: {e}")
             return False
 
-    async def _load_existing_data(self):
+    def _index_manifest(self) -> Dict[str, Any]:
+        return {
+            "schema_version": self.INDEX_SCHEMA_VERSION,
+            "backend": self.vector_store.backend,
+            "model_id": self.embedding_model.model_name,
+            "model_revision": self.embedding_model.model_revision,
+            "dimension": self.embedding_model.dimension,
+            "normalized": self.embedding_model.normalized,
+            "query_prompt": self.embedding_model.query_prompt_name,
+            "query_prompt_text": self.embedding_model.query_prompt,
+        }
+
+    @property
+    def _manifest_path(self) -> Path:
+        return self.vector_store_path / "vector_store_manifest.json"
+
+    def _manifest_matches(self) -> bool:
+        if self.embedding_model.model_type == "tfidf":
+            return False
+        try:
+            if not self._manifest_path.exists():
+                return False
+            with open(self._manifest_path, "r", encoding="utf-8") as f:
+                existing = json.load(f)
+            return existing == self._index_manifest()
+        except (OSError, ValueError, TypeError):
+            return False
+
+    def _save_vector_store(self) -> bool:
+        store_file = self.vector_store_path / "vector_store"
+        if not self.vector_store.save(str(store_file)):
+            return False
+        manifest_temp = self._manifest_path.with_suffix(".json.tmp")
+        try:
+            with open(manifest_temp, "w", encoding="utf-8") as f:
+                json.dump(self._index_manifest(), f, ensure_ascii=False, indent=2)
+            manifest_temp.replace(self._manifest_path)
+            return True
+        except OSError as e:
+            logger.error(f"保存向量索引清单失败: {e}")
+            return False
+
+    async def _load_existing_data(self) -> bool:
         """加载现有的向量数据"""
         try:
             # 尝试从文件加载
@@ -327,21 +469,23 @@ class VectorService:
                 store_file.with_suffix(".faiss").exists()
                 or store_file.with_suffix(".pkl").exists()
             ):
-                self.vector_store.load(str(store_file))
-                await self._hydrate_knowledge_namespaces()
-                logger.info("已加载现有向量存储")
-                return
+                if self._manifest_matches() and self.vector_store.load(str(store_file)):
+                    await self._hydrate_knowledge_namespaces()
+                    logger.info("已加载兼容的向量存储")
+                    return True
+                logger.warning("向量索引与当前模型不兼容，将从数据库重建")
 
             # 如果没有现有文件，从数据库重建
             if not self.database_service:
-                logger.info("没有数据库服务，跳过数据加载")
-                return
+                logger.error("没有数据库服务，无法重建不兼容的向量索引")
+                return False
 
             logger.info("正在从数据库重建向量存储...")
-            await self._rebuild_from_database()
+            return await self._rebuild_from_database()
 
         except Exception as e:
             logger.error(f"加载现有数据失败: {e}")
+            return False
 
     async def _hydrate_knowledge_namespaces(self) -> None:
         """为升级前的向量元数据补齐知识命名空间。"""
@@ -359,10 +503,9 @@ class VectorService:
                 metadata["knowledge_namespace"] = namespaces.get(metadata.get("id"), "")
                 changed = True
         if changed:
-            store_file = self.vector_store_path / "vector_store"
-            self.vector_store.save(str(store_file))
+            self._save_vector_store()
 
-    async def _rebuild_from_database(self):
+    async def _rebuild_from_database(self) -> bool:
         """从数据库重建向量存储"""
         try:
             # 获取所有知识条目
@@ -370,9 +513,11 @@ class VectorService:
                 self.database_service.get_all_knowledge_entries
             )
 
+            self.vector_store.reset()
+
             if not knowledge_entries:
                 logger.info("数据库中没有知识条目")
-                return
+                return self._save_vector_store()
 
             # 准备文本和元数据
             texts = []
@@ -405,13 +550,15 @@ class VectorService:
             await self.vector_store.add_vectors(vectors, metadata)
 
             # 保存到文件
-            store_file = self.vector_store_path / "vector_store"
-            self.vector_store.save(str(store_file))
+            if not self._save_vector_store():
+                return False
 
             logger.info(f"从数据库重建了 {len(texts)} 个向量")
+            return True
 
         except Exception as e:
             logger.error(f"从数据库重建向量存储失败: {e}")
+            return False
 
     async def add_knowledge(self, knowledge_entry: KnowledgeEntry) -> bool:
         """添加知识条目"""
@@ -423,6 +570,13 @@ class VectorService:
             # 组合文本内容
             content = f"{knowledge_entry.title} {knowledge_entry.content} {knowledge_entry.summary}"
 
+            # TF-IDF 的词表依赖完整语料；数据库已先写入新条目，因此整体重建。
+            if self.embedding_model.model_type == "tfidf":
+                if not self.database_service:
+                    logger.error("TF-IDF 添加知识需要数据库服务以重建词表")
+                    return False
+                return await self._rebuild_from_database()
+
             # 生成向量
             vector = await self.embedding_model.encode_single(content.strip())
 
@@ -431,8 +585,8 @@ class VectorService:
             await self.vector_store.add_vectors([vector], metadata)
 
             # 保存到文件
-            store_file = self.vector_store_path / "vector_store"
-            self.vector_store.save(str(store_file))
+            if not self._save_vector_store():
+                return False
 
             logger.debug(f"添加知识条目: {knowledge_entry.title}")
             return True
@@ -455,7 +609,9 @@ class VectorService:
                 return []
 
             # 生成查询向量
-            query_vector = await self.embedding_model.encode_single(query)
+            query_vector = await self.embedding_model.encode_single(
+                query, is_query=True
+            )
 
             # 搜索相似向量
             search_size = (
@@ -489,10 +645,9 @@ class VectorService:
     def cleanup(self):
         """清理资源"""
         try:
-            if self.vector_store:
+            if self.vector_store and self._initialized:
                 # 保存当前状态
-                store_file = self.vector_store_path / "vector_store"
-                self.vector_store.save(str(store_file))
+                self._save_vector_store()
 
             if self.embedding_model:
                 del self.embedding_model

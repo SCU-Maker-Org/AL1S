@@ -178,24 +178,18 @@ class AL1SBot:
         """初始化MCP服务器"""
         if self.mcp_service and self.config.mcp.enabled:
             # 转换配置格式
-            mcp_configs = []
-            for server_config in self.config.mcp.servers:
-                if server_config.enabled:
-                    mcp_configs.append(
-                        {
-                            "name": server_config.name,
-                            "command": server_config.command,
-                            "args": server_config.args,
-                            "env": server_config.env,
-                        }
-                    )
+            mcp_configs = [
+                server_config
+                for server_config in self.config.mcp.servers
+                if server_config.enabled
+            ]
 
             if mcp_configs:
                 logger.info(f"正在初始化 {len(mcp_configs)} 个MCP服务器...")
                 await self.mcp_service.initialize_default_servers(mcp_configs)
 
                 # 显示已连接的工具
-                tools = self.mcp_service.get_available_tools()
+                tools = self.mcp_service.get_available_tools("admin")
                 if tools:
                     logger.info(f"已加载 {len(tools)} 个MCP工具: {list(tools.keys())}")
                 else:

@@ -3,11 +3,12 @@
 """
 
 import os
+import re
 import tomllib
 from pathlib import Path
 from typing import Literal, Optional
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 class OpenAIConfig(BaseModel):
@@ -104,11 +105,40 @@ class RoleConfig(BaseModel):
 class MCPServerConfig(BaseModel):
     """MCP服务器配置"""
 
-    name: str = Field(..., description="服务器名称")
-    command: str = Field(..., description="启动命令")
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(..., min_length=1, description="服务器名称")
+    command: str = Field(..., min_length=1, description="启动命令")
     args: list[str] = Field(default_factory=list, description="命令参数")
     env: dict[str, str] = Field(default_factory=dict, description="环境变量")
     enabled: bool = Field(True, description="是否启用")
+    connect_timeout: float = Field(60.0, ge=1.0, le=600.0)
+    tool_timeout: float = Field(30.0, ge=1.0, le=600.0)
+    include_tools: list[str] = Field(default_factory=list)
+    exclude_tools: list[str] = Field(default_factory=list)
+    tool_prefix: str = Field(default="", pattern=r"^[A-Za-z0-9_-]*$", max_length=32)
+    read_only: bool = False
+    access: Literal["public", "private", "admin"] = "admin"
+    max_result_chars: int = Field(30000, ge=1000, le=200000)
+
+    @model_validator(mode="after")
+    def resolve_environment_references(self):
+        resolved = {}
+        for key, value in self.env.items():
+            match = re.fullmatch(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}", value)
+            if not match:
+                resolved[key] = value
+                continue
+            environment_name = match.group(1)
+            environment_value = os.getenv(environment_name)
+            if environment_value is None:
+                if self.enabled:
+                    raise ValueError(f"MCP环境变量未设置: {environment_name}")
+                resolved[key] = value
+            else:
+                resolved[key] = environment_value
+        self.env = resolved
+        return self
 
 
 class MCPConfig(BaseModel):
@@ -119,13 +149,23 @@ class MCPConfig(BaseModel):
         default_factory=list, description="MCP服务器列表"
     )
 
+    @model_validator(mode="after")
+    def validate_unique_server_names(self):
+        names = [server.name for server in self.servers]
+        duplicates = sorted({name for name in names if names.count(name) > 1})
+        if duplicates:
+            raise ValueError(f"MCP服务器名称重复: {', '.join(duplicates)}")
+        return self
+
 
 class RAGConfig(BaseModel):
     """RAG配置"""
 
     enabled: bool = Field(True, description="是否启用RAG功能")
     vector_store_path: str = Field("data/vector_store", description="向量存储路径")
-    embedding_model: str = Field("tfidf", description="嵌入模型类型")
+    embedding_model: str = Field(
+        "Qwen/Qwen3-Embedding-0.6B", description="嵌入模型类型"
+    )
     max_knowledge_entries: int = Field(10000, description="最大知识条目数")
     similarity_threshold: float = Field(0.3, description="相似度阈值")
     top_k_retrieval: int = Field(5, description="检索返回的最大条目数")
@@ -143,14 +183,22 @@ class AgentConfig(BaseModel):
     # 通用配置
     vector_store: str = Field("faiss", description="向量存储类型: memory | faiss")
     embedding_model: str = Field(
-        "tfidf",
-        description="嵌入模型: tfidf | sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2",
+        "Qwen/Qwen3-Embedding-0.6B",
+        description="嵌入模型: tfidf | Hugging Face 模型 ID",
     )
+    embedding_revision: Optional[str] = Field(
+        "97b0c614be4d77ee51c0cef4e5f07c00f9eb65b3",
+        description="Hugging Face 模型 revision（提交哈希、标签或分支）",
+    )
+    embedding_device: Literal["auto", "cpu", "mps", "cuda"] = "cpu"
+    embedding_batch_size: int = Field(8, ge=1, le=128)
     vector_store_path: str = Field("data/vector_store", description="向量存储路径")
 
     # 学习配置
     auto_learning: bool = Field(True, description="是否启用自动学习")
     learning_threshold: float = Field(0.8, description="学习阈值")
+    max_tool_rounds: int = Field(4, ge=1, le=10)
+    max_tool_calls: int = Field(12, ge=1, le=50)
 
 
 class LangChainConfig(BaseModel):
@@ -161,7 +209,9 @@ class LangChainConfig(BaseModel):
     embedding: str = Field(
         "huggingface_bge_m3", description="嵌入模型提供者：openai | huggingface_bge_m3"
     )
-    embedding_model_name: str = Field("BAAI/bge-m3", description="HF嵌入模型名称")
+    embedding_model_name: str = Field(
+        "Qwen/Qwen3-Embedding-0.6B", description="HF嵌入模型名称"
+    )
     embedding_device: str = Field("cpu", description="嵌入推理设备：cpu | cuda")
     model_cache_dir: str = Field("data/models", description="模型缓存目录")
     download_timeout: int = Field(300, description="模型下载超时时间（秒）")

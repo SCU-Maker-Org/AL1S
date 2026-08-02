@@ -2,6 +2,7 @@
 命令处理器模块
 """
 
+import html
 import re
 from typing import Dict, Optional
 
@@ -62,6 +63,14 @@ class CommandHandler(BaseHandler):
 
         return SessionKey(
             update.effective_chat.id, 0, update.effective_user.id, "private"
+        )
+
+    @staticmethod
+    def _mcp_access_level(update: Update) -> str:
+        return MCPService.resolve_caller_access(
+            getattr(update.effective_user, "id", None),
+            getattr(update.effective_chat, "type", None),
+            config.telegram.admin_user_ids,
         )
 
     def _initialize_commands(self) -> Dict[str, Command]:
@@ -887,7 +896,7 @@ Topic ID: {stats.get('thread_id', 0)}
                 return False
 
             # 获取可用工具
-            tools = self.mcp_service.get_available_tools()
+            tools = self.mcp_service.get_available_tools(self._mcp_access_level(update))
 
             if not tools:
                 await self._reply(
@@ -912,18 +921,26 @@ Topic ID: {stats.get('thread_id', 0)}
             tools_text = f"🔧 <b>可用的MCP工具 ({len(tools)}个)</b>\n\n"
 
             for server_name, server_tools in tools_by_server.items():
-                tools_text += f"📦 <b>{server_name}</b> ({len(server_tools)}个工具)\n"
+                safe_server_name = html.escape(str(server_name))
+                tools_text += (
+                    f"📦 <b>{safe_server_name}</b> ({len(server_tools)}个工具)\n"
+                )
 
                 # 每个服务器最多显示前8个工具，避免消息过长
                 displayed_tools = server_tools[:8]
                 for tool_name, description in displayed_tools:
                     # 截断过长的描述
+                    description = str(description or "无描述")
                     short_desc = (
                         description[:50] + "..."
                         if len(description) > 50
                         else description
                     )
-                    tools_text += f"  • <code>{tool_name}</code> - {short_desc}\n"
+                    safe_tool_name = html.escape(str(tool_name))
+                    safe_description = html.escape(short_desc)
+                    tools_text += (
+                        f"  • <code>{safe_tool_name}</code> - {safe_description}\n"
+                    )
 
                 if len(server_tools) > 8:
                     tools_text += f"  • ... 还有 {len(server_tools) - 8} 个工具\n"
@@ -958,7 +975,9 @@ Topic ID: {stats.get('thread_id', 0)}
                 return False
 
             # 获取服务器状态
-            server_status = self.mcp_service.get_server_status()
+            server_status = self.mcp_service.get_server_status(
+                self._mcp_access_level(update)
+            )
 
             if not server_status:
                 await self._reply(
@@ -986,15 +1005,20 @@ Topic ID: {stats.get('thread_id', 0)}
                 else:
                     status_icon = "❌"
 
-                status_text += f"{status_icon} <b>{server_name}</b>\n"
-                status_text += (
-                    f"📂 命令: <code>{status.get('command', '未知')}</code>\n"
-                )
+                safe_server_name = html.escape(str(server_name))
+                safe_command = html.escape(str(status.get("command", "未知")))
+                status_text += f"{status_icon} <b>{safe_server_name}</b>\n"
+                status_text += f"📂 命令: <code>{safe_command}</code>\n"
                 status_text += f"🔧 工具数量: {tools_count}\n"
+
+                if status.get("error"):
+                    safe_error = html.escape(str(status["error"]))
+                    status_text += f"⚠️ 错误: <code>{safe_error}</code>\n"
 
                 if tools_count > 0:
                     tools_list = status.get("tools", [])
-                    status_text += f"🛠️ 工具: {', '.join(tools_list[:3])}"
+                    safe_tools = [html.escape(str(tool)) for tool in tools_list[:3]]
+                    status_text += f"🛠️ 工具: {', '.join(safe_tools)}"
                     if len(tools_list) > 3:
                         status_text += f" 等{len(tools_list)}个"
                     status_text += "\n"

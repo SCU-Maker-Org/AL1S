@@ -31,9 +31,10 @@ dependencies = [
   "PicImageSearch>=3.12.9",
   "pyyaml>=6.0.2",
   "openai>=1.105.0",
-  "mcp[cli]>=1.0.0",
+  "mcp[cli]>=1.13.1,<2",
   "faiss-cpu>=1.7.4",
   "numpy>=2.0.0",
+  "torch>=2.13.0,<2.14",
   "sentence-transformers>=5.1.0",
   "langchain>=0.3.0",
   "langchain-community>=0.3.0",
@@ -50,14 +51,24 @@ Repository = "https://github.com/texasoct/al1s"
 Issues = "https://github.com/texasoct/al1s/issues"
 Documentation = "https://github.com/texasoct/al1s#README.md"
 
-[tool.uv]
-dev-dependencies = [
+[dependency-groups]
+dev = [
   "pytest>=8.4.1",
   "pytest-asyncio>=1.1.0",
   "black>=25.1.0",
   "isort>=6.0.1",
   "flake8>=7.3.0",
 ]
+
+[tool.uv.sources]
+torch = [
+  { index = "pytorch-cpu", marker = "sys_platform == 'linux'" },
+]
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
 
 [tool.pytest.ini_options]
 pythonpath = ["."]
@@ -68,7 +79,3 @@ target-version = ["py313"]
 
 [tool.isort]
 profile = "black"
-
-[[tool.uv.index]]
-url = "https://mirrors.ustc.edu.cn/pypi/simple/"
-default = true

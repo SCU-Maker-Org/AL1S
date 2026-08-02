@@ -8,8 +8,8 @@
 - 图片分析
 """
 
-import asyncio
 import json
+import time
 from contextvars import ContextVar
 from typing import Any, Dict, List, Optional
 
@@ -87,17 +87,21 @@ class UnifiedAgentService:
                 else "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
             )
             vector_store_backend = (
-                config.agent.vector_store_backend
-                if hasattr(config, "agent")
-                and hasattr(config.agent, "vector_store_backend")
+                config.agent.vector_store
+                if hasattr(config, "agent") and hasattr(config.agent, "vector_store")
                 else "faiss"
             )
 
             # 初始化 vector service
-            await self.vector_service.initialize(
+            initialized = await self.vector_service.initialize(
                 embedding_model_type=embedding_model,
                 vector_store_backend=vector_store_backend,
+                embedding_revision=config.agent.embedding_revision,
+                embedding_device=config.agent.embedding_device,
+                embedding_batch_size=config.agent.embedding_batch_size,
             )
+            if not initialized:
+                raise RuntimeError("向量服务初始化失败")
 
             logger.info("RAG 组件初始化完成")
         except Exception as e:
@@ -114,6 +118,7 @@ class UnifiedAgentService:
         tools: List[Dict[str, Any]] = None,
         knowledge_namespace: Optional[str] = None,
         enable_rag: bool = True,
+        tool_access: str = "public",
     ) -> Optional[str]:
         """统一的聊天完成接口"""
         try:
@@ -187,8 +192,8 @@ class UnifiedAgentService:
             needs_web_access = any(keyword in user_content for keyword in web_keywords)
 
             # 构建工具列表
-            available_tools = tools or []
-            if needs_web_access and self.tool_handler:
+            available_tools = list(tools or [])
+            if needs_web_access and self.tool_handler and tool_access == "admin":
                 # 添加网页抓取工具
                 web_scraper_tool = {
                     "type": "function",
@@ -207,7 +212,11 @@ class UnifiedAgentService:
                         },
                     },
                 }
-                available_tools.append(web_scraper_tool)
+                existing_tool_names = {
+                    tool.get("function", {}).get("name") for tool in available_tools
+                }
+                if "web_scraper" not in existing_tool_names:
+                    available_tools.append(web_scraper_tool)
 
             # 如果有工具，添加工具参数
             if available_tools and self.tool_handler:
@@ -223,7 +232,7 @@ class UnifiedAgentService:
                 # 处理工具调用
                 if message.tool_calls and self.tool_handler:
                     return await self._handle_tool_calls(
-                        message.tool_calls, full_messages
+                        message, full_messages, available_tools, tool_access
                     )
 
                 return message.content
@@ -267,90 +276,160 @@ class UnifiedAgentService:
             return ""
 
     async def _handle_tool_calls(
-        self, tool_calls, messages: List[Dict[str, str]]
+        self,
+        assistant_message,
+        messages: List[Dict[str, Any]],
+        tools: Optional[List[Dict[str, Any]]] = None,
+        caller_access: str = "public",
     ) -> str:
         """处理工具调用"""
         try:
-            tool_results = []
+            total_tool_calls = 0
+            for round_index in range(config.agent.max_tool_rounds):
+                prepared_calls = []
+                for index, tool_call in enumerate(assistant_message.tool_calls):
+                    tool_name = tool_call.function.name
+                    tool_call_id = getattr(tool_call, "id", None) or (
+                        f"call_{round_index}_{index}_{tool_name}"
+                    )
+                    prepared_calls.append(
+                        {
+                            "id": tool_call_id,
+                            "name": tool_name,
+                            "arguments": tool_call.function.arguments or "{}",
+                        }
+                    )
 
-            for tool_call in tool_calls:
-                tool_name = tool_call.function.name
-                try:
-                    arguments = json.loads(tool_call.function.arguments)
-                except json.JSONDecodeError:
-                    arguments = {}
+                total_tool_calls += len(prepared_calls)
+                if total_tool_calls > config.agent.max_tool_calls:
+                    logger.warning("工具调用总数超过配置上限")
+                    return "工具调用次数过多，已停止继续执行。"
 
-                # 调用MCP工具
-                result = await self.tool_handler(tool_name, arguments)
+                assistant_payload = {
+                    "role": "assistant",
+                    "tool_calls": [
+                        {
+                            "id": tool_call["id"],
+                            "type": "function",
+                            "function": {
+                                "name": tool_call["name"],
+                                "arguments": tool_call["arguments"],
+                            },
+                        }
+                        for tool_call in prepared_calls
+                    ],
+                }
+                if assistant_message.content is not None:
+                    assistant_payload["content"] = assistant_message.content
+                messages.append(assistant_payload)
 
-                tool_results.append(
-                    {
-                        "tool_call_id": (
-                            tool_call.id
-                            if hasattr(tool_call, "id")
-                            else f"call_{tool_name}"
-                        ),
-                        "role": "tool",
-                        "name": tool_name,
-                        "content": result or "工具执行完成",
-                    }
+                tool_results = []
+                for tool_call in prepared_calls:
+                    tool_name = tool_call["name"]
+                    try:
+                        arguments = json.loads(tool_call["arguments"])
+                    except (json.JSONDecodeError, TypeError):
+                        arguments = {}
+
+                    result = await self.tool_handler(
+                        tool_name, arguments, caller_access
+                    )
+                    tool_results.append(
+                        {
+                            "tool_call_id": tool_call["id"],
+                            "role": "tool",
+                            "name": tool_name,
+                            "content": result or "工具执行完成",
+                        }
+                    )
+                messages.extend(tool_results)
+
+                api_params = {
+                    "model": config.openai.model,
+                    "messages": messages,
+                    "max_tokens": config.openai.max_tokens,
+                    "temperature": config.openai.temperature,
+                }
+                if tools:
+                    api_params["tools"] = tools
+                    api_params["tool_choice"] = "auto"
+                response = await self.openai_client.chat.completions.create(
+                    **api_params
                 )
 
-            # 添加工具结果到消息历史
-            messages.extend(tool_results)
+                if not response.choices or not response.choices[0].message:
+                    return "工具调用完成，但没有生成回复。"
+                assistant_message = response.choices[0].message
+                if not getattr(assistant_message, "tool_calls", None):
+                    return assistant_message.content or "工具调用完成。"
 
-            # 再次调用OpenAI API获取最终回复
-            response = await self.openai_client.chat.completions.create(
-                model=config.openai.model,
-                messages=messages,
-                max_tokens=config.openai.max_tokens,
-                temperature=config.openai.temperature,
-            )
-
-            if response.choices and response.choices[0].message:
-                return response.choices[0].message.content
-
-            return "工具调用完成，但没有生成回复。"
+            logger.warning("工具调用轮数超过配置上限")
+            return "工具调用轮数过多，已停止继续执行。"
 
         except Exception as e:
             logger.error(f"处理工具调用失败: {e}")
             return f"工具调用过程中出现错误: {str(e)}"
 
     async def _handle_mcp_tool(
-        self, tool_name: str, arguments: Dict[str, Any]
+        self,
+        tool_name: str,
+        arguments: Dict[str, Any],
+        caller_access: str = "public",
     ) -> Optional[str]:
         """MCP工具处理器"""
+        started_at = time.monotonic()
+        error_message = None
         try:
             # 处理自定义网页抓取工具
             if tool_name == "web_scraper":
-                url = arguments.get("url") or arguments.get("query", "")
-                if url:
-                    result = await self._scrape_webpage(url)
+                if caller_access != "admin":
+                    result = "工具调用失败: 无权调用 web_scraper"
+                    error_message = result
                 else:
-                    result = "网页抓取失败: 未提供URL"
+                    url = arguments.get("url") or arguments.get("query", "")
+                    if url:
+                        result = await self._scrape_webpage(url)
+                    else:
+                        result = "网页抓取失败: 未提供URL"
+                        error_message = result
             else:
                 # 处理其他MCP工具
                 if not self.mcp_service:
                     return None
 
-                result = await self.mcp_service.call_tool(tool_name, arguments)
-
-            # 记录工具调用到数据库
-            conversation_id = self._conversation_id_context.get()
-            if self.database_service and conversation_id:
-                await asyncio.to_thread(
-                    self.database_service.save_tool_call,
-                    conversation_id,
-                    tool_name,
-                    arguments,
-                    result,
+                result = await self.mcp_service.call_tool(
+                    tool_name, arguments, caller_access=caller_access
                 )
-
-            return result
+                if result and result.startswith(("工具调用失败:", "工具调用超时:")):
+                    error_message = result
 
         except Exception as e:
             logger.error(f"工具调用失败: {e}")
-            return f"工具调用失败: {str(e)}"
+            error_message = str(e)
+            result = f"工具调用失败: {error_message}"
+
+        # Persistence is best-effort and must not replace a successful tool result.
+        conversation_id = self._conversation_id_context.get()
+        if self.database_service and conversation_id:
+            try:
+                logged_arguments = arguments
+                if hasattr(self.mcp_service, "redact_sensitive_data"):
+                    logged_arguments = self.mcp_service.redact_sensitive_data(arguments)
+                recorded = await self.database_service.record_tool_call(
+                    conversation_id=conversation_id,
+                    tool_name=tool_name,
+                    arguments=logged_arguments,
+                    result=result,
+                    success=error_message is None,
+                    error_message=error_message,
+                    execution_time=time.monotonic() - started_at,
+                )
+                if not recorded:
+                    logger.warning(f"工具 {tool_name} 的调用记录未写入数据库")
+            except Exception as e:
+                logger.warning(f"记录工具 {tool_name} 调用失败: {e}")
+
+        return result
 
     async def _scrape_webpage(self, url: str) -> str:
         """网页抓取功能"""
@@ -365,7 +444,11 @@ class UnifiedAgentService:
             async with aiohttp.ClientSession(
                 timeout=aiohttp.ClientTimeout(total=30),
                 headers={
-                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+                    "User-Agent": (
+                        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                        "AppleWebKit/537.36 (KHTML, like Gecko) "
+                        "Chrome/91.0.4472.124 Safari/537.36"
+                    )
                 },
             ) as session:
                 async with session.get(url) as response:

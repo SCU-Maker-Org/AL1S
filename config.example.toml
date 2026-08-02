@@ -83,12 +83,17 @@ vector_store_path = "data/vector_store"
 
 # 嵌入模型配置
 # "tfidf" - 轻量快速，适合中文
-# "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2" - 多语言语义模型（推荐）
-embedding_model = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
+# "Qwen/Qwen3-Embedding-0.6B" - 新一代多语言语义模型（推荐）
+embedding_model = "Qwen/Qwen3-Embedding-0.6B"
+embedding_revision = "97b0c614be4d77ee51c0cef4e5f07c00f9eb65b3"
+embedding_device = "cpu"  # "auto" | "cpu" | "mps" | "cuda"
+embedding_batch_size = 8
 
 # 自动学习配置
 auto_learning = true
 learning_threshold = 0.8
+max_tool_rounds = 4
+max_tool_calls = 12
 
 # ====================
 # LangChain 特定配置
@@ -96,7 +101,7 @@ learning_threshold = 0.8
 [langchain]
 # 嵌入模型配置
 embedding = "huggingface_bge_m3"  # "openai" | "huggingface_bge_m3"
-embedding_model_name = "BAAI/bge-m3"
+embedding_model_name = "Qwen/Qwen3-Embedding-0.6B"
 embedding_device = "cpu"  # "cpu" | "cuda"
 
 # 模型缓存配置
@@ -115,35 +120,85 @@ chunk_overlap = 200
 [mcp]
 enabled = true
 
-# 文件系统工具
+# 时间与时区转换：无密钥、无副作用，可公开使用
+[[mcp.servers]]
+name = "time"
+command = "uvx"
+args = ["--with", "mcp<2", "mcp-server-time", "--local-timezone", "Asia/Shanghai"]
+enabled = true
+access = "public"
+read_only = true
+connect_timeout = 90
+tool_timeout = 15
+max_result_chars = 5000
+
+# 最新开源库文档；Context7 3.2.5 需要 Node.js >= 20.18.1
+[[mcp.servers]]
+name = "context7"
+command = "npx"
+args = ["-y", "@upstash/context7-mcp@3.2.5"]
+env = { PATH = "/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin", npm_config_cache = "/absolute/path/to/npm-cache" }
+enabled = false
+access = "private"
+read_only = true
+tool_prefix = "ctx7_"
+connect_timeout = 120
+tool_timeout = 45
+
+# 文件系统工具：请只开放必要目录
 [[mcp.servers]]
 name = "filesystem"
 command = "npx"
-args = ["-y", "@modelcontextprotocol/server-filesystem", "."]
-enabled = true
+args = ["-y", "@modelcontextprotocol/server-filesystem", "/absolute/path/to/allowed/directory"]
+env = { PATH = "/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin", npm_config_cache = "/absolute/path/to/npm-cache" }
+enabled = false
+access = "admin"
+read_only = true
 
 # 网络搜索工具（需要API密钥）
 [[mcp.servers]]
 name = "web-search"
 command = "npx"
-args = ["-y", "tavily-search"]
-enabled = true
-env = { TAVILY_API_KEY = "your-tavily-api-key" }
+args = ["-y", "tavily-mcp@0.2.21"]
+enabled = false
+env = { TAVILY_API_KEY = "tvly-your-api-key" }
+access = "admin"
+tool_timeout = 45
 
-# GitHub 工具（需要访问令牌）
+# GitHub 官方 MCP Server（需要先安装服务器和访问令牌）
 [[mcp.servers]]
 name = "github"
-command = "npx"
-args = ["-y", "mcp-remote https://mcp.tavily.com/mcp/?tavilyApiKey=<your-api-key>"]
+command = "/absolute/path/to/github-mcp-server"
+args = ["stdio", "--read-only"]
 enabled = false
-env = { GITHUB_PERSONAL_ACCESS_TOKEN = "your-github-token" }
+env = { GITHUB_PERSONAL_ACCESS_TOKEN = "github_pat_your-token" }
+access = "admin"
 
-# SQLite 数据库工具
+# 通用网页抓取可访问本机/内网地址，必须保持管理员可见且默认关闭
+[[mcp.servers]]
+name = "fetch"
+command = "uvx"
+args = ["--with", "mcp<2", "mcp-server-fetch"]
+enabled = false
+access = "admin"
+include_tools = ["fetch"]
+
+# 本地 Git 只开放审计类工具，写操作不在白名单内
+[[mcp.servers]]
+name = "git"
+command = "uvx"
+args = ["--with", "mcp<2", "mcp-server-git", "--repository", "/absolute/path/to/repository"]
+enabled = false
+access = "admin"
+include_tools = ["git_status", "git_diff_unstaged", "git_diff_staged", "git_log", "git_show", "git_branch"]
+
+# SQLite 参考服务器具有写入能力，不要直接连接生产数据库
 [[mcp.servers]]
 name = "sqlite"
-command = "npx"
-args = ["-y", "@modelcontextprotocol/server-sqlite", "data/bot.db"]
-enabled = true
+command = "uvx"
+args = ["mcp-server-sqlite", "--db-path", "/absolute/path/to/database.db"]
+enabled = false
+access = "admin"
 
 # ====================
 # 图片搜索配置

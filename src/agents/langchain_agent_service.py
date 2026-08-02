@@ -71,6 +71,9 @@ class LangChainAgentService:
             vector_success = await self.vector_service.initialize(
                 embedding_model_type=embedding_model_type,
                 vector_store_backend=vector_store_backend,
+                embedding_revision=config.agent.embedding_revision,
+                embedding_device=config.agent.embedding_device,
+                embedding_batch_size=config.agent.embedding_batch_size,
             )
 
             if not vector_success:
