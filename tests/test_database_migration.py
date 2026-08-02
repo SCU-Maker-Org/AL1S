@@ -96,6 +96,42 @@ async def test_legacy_database_migrates_idempotently(tmp_path):
             ).fetchone()[0]
             == 1
         )
+        assert (
+            conn.execute(
+                "SELECT COUNT(*) FROM schema_migrations WHERE version = 3"
+            ).fetchone()[0]
+            == 1
+        )
+        assert conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE name = 'rag_chunks_fts'"
+        ).fetchone()
+        assert conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE name = 'user_profiles'"
+        ).fetchone()
+        assert (
+            conn.execute(
+                "SELECT COUNT(*) FROM schema_migrations WHERE version = 4"
+            ).fetchone()[0]
+            == 1
+        )
+        assert "document_key" in {
+            row["name"] for row in conn.execute("PRAGMA table_info(rag_documents)")
+        }
+        assert (
+            conn.execute(
+                "SELECT COUNT(*) FROM schema_migrations WHERE version = 5"
+            ).fetchone()[0]
+            == 1
+        )
+        assert "source_root" in {
+            row["name"] for row in conn.execute("PRAGMA table_info(rag_documents)")
+        }
+        assert (
+            conn.execute(
+                "SELECT COUNT(*) FROM schema_migrations WHERE version = 6"
+            ).fetchone()[0]
+            == 1
+        )
 
     # The old unique(user_id, chat_id) constraint is gone: one user can own two topics.
     first = SessionKey(-100, 7, 0, "topic")
@@ -114,7 +150,7 @@ async def test_legacy_database_migrates_idempotently(tmp_path):
         assert conn.execute("SELECT COUNT(*) FROM conversations").fetchone()[0] == 3
 
 
-def test_fresh_schema_is_already_at_v2(tmp_path):
+def test_fresh_schema_has_current_migrations(tmp_path):
     path = tmp_path / "fresh.db"
     init_sql = (Path(__file__).parents[1] / "data" / "init_db.sql").read_text(
         encoding="utf-8"
@@ -133,3 +169,83 @@ def test_fresh_schema_is_already_at_v2(tmp_path):
             "SELECT sql FROM sqlite_master WHERE name = 'conversations'"
         ).fetchone()[0]
         assert "session_owner_id" in table_sql
+        assert (
+            conn.execute(
+                "SELECT COUNT(*) FROM schema_migrations WHERE version = 3"
+            ).fetchone()[0]
+            == 1
+        )
+        assert (
+            conn.execute(
+                "SELECT COUNT(*) FROM schema_migrations WHERE version = 4"
+            ).fetchone()[0]
+            == 1
+        )
+        assert (
+            conn.execute(
+                "SELECT COUNT(*) FROM schema_migrations WHERE version = 5"
+            ).fetchone()[0]
+            == 1
+        )
+        assert (
+            conn.execute(
+                "SELECT COUNT(*) FROM schema_migrations WHERE version = 6"
+            ).fetchone()[0]
+            == 1
+        )
+
+
+def test_v6_isolates_legacy_per_user_group_memory(tmp_path):
+    path = tmp_path / "legacy-per-user.db"
+    init_sql = (Path(__file__).parents[1] / "data" / "init_db.sql").read_text(
+        encoding="utf-8"
+    )
+    with sqlite3.connect(path) as conn:
+        conn.executescript(init_sql)
+        conn.execute("DELETE FROM schema_migrations WHERE version = 6")
+        conn.execute(
+            "INSERT INTO users(id, telegram_user_id, username) VALUES (1, 12345, 'alice')"
+        )
+        conn.execute(
+            """INSERT INTO conversations (
+                   id, user_id, chat_id, thread_id, session_scope, session_owner_id,
+                   knowledge_namespace, chat_type
+               ) VALUES (5, 1, -100, 7, 'per_user', 12345, 'topic:-100:7', 'group')"""
+        )
+        conn.execute(
+            """INSERT INTO knowledge_entries (
+                   user_id, conversation_id, title, content, knowledge_namespace
+               ) VALUES (1, 5, 'private fact', 'isolated', 'topic:-100:7')"""
+        )
+        conn.commit()
+
+    service = DatabaseService(str(path))
+
+    with service.get_connection() as conn:
+        conversation_namespace = conn.execute(
+            "SELECT knowledge_namespace FROM conversations WHERE id = 5"
+        ).fetchone()[0]
+        knowledge_namespace = conn.execute(
+            "SELECT knowledge_namespace FROM knowledge_entries WHERE conversation_id = 5"
+        ).fetchone()[0]
+    assert conversation_namespace == "topic:-100:7:user:12345"
+    assert knowledge_namespace == conversation_namespace
+
+
+def test_user_profiles_are_isolated_in_sqlite(tmp_path):
+    path = tmp_path / "profiles.db"
+    init_sql = (Path(__file__).parents[1] / "data" / "init_db.sql").read_text(
+        encoding="utf-8"
+    )
+    with sqlite3.connect(path) as conn:
+        conn.executescript(init_sql)
+    service = DatabaseService(str(path))
+
+    service.upsert_user_profile(101, "PostgreSQL", "hash-one", "manual")
+    service.upsert_user_profile(202, "CUDA", "hash-two", "profile.md")
+
+    assert service.get_user_profile(101)["content"] == "PostgreSQL"
+    assert service.get_user_profile(202)["content"] == "CUDA"
+    assert service.delete_user_profile(101) is True
+    assert service.get_user_profile(101) is None
+    assert service.get_user_profile(202)["content"] == "CUDA"

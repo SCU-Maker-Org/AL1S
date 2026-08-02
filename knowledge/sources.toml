@@ -1,0 +1,326 @@
+manifest_version = 1
+
+[policy]
+allowed_hosts = [
+  "www.postgresql.org",
+  "www.kernel.org",
+  "kubernetes.io",
+  "www.llvm.org",
+  "docs.pytorch.org",
+  "docs.nvidia.com",
+  "docs.vllm.ai",
+  "cocoonstack.github.io",
+]
+max_response_bytes = 8388608
+timeout_seconds = 30
+max_redirects = 5
+
+[[sources]]
+id = "cocoon_documentation"
+url = "https://cocoonstack.github.io/cocoon/"
+title = "Cocoon Sandbox Documentation"
+domains = ["sys", "distributed", "storage", "cloud", "security"]
+product = "Cocoon"
+version = "master"
+license = "MIT"
+trust_level = "official"
+
+[[sources]]
+id = "postgresql_transactions"
+url = "https://www.postgresql.org/docs/current/tutorial-transactions.html"
+title = "PostgreSQL Transactions"
+domains = ["db", "storage"]
+product = "PostgreSQL"
+version = "current"
+license = "PostgreSQL License"
+trust_level = "official"
+
+[[sources]]
+id = "postgresql_mvcc"
+url = "https://www.postgresql.org/docs/current/mvcc.html"
+title = "PostgreSQL Concurrency Control and MVCC"
+domains = ["db", "sys"]
+product = "PostgreSQL"
+version = "current"
+license = "PostgreSQL License"
+trust_level = "official"
+
+[[sources]]
+id = "postgresql_wal"
+url = "https://www.postgresql.org/docs/current/wal.html"
+title = "PostgreSQL Write-Ahead Logging"
+domains = ["db", "storage", "sys"]
+product = "PostgreSQL"
+version = "current"
+license = "PostgreSQL License"
+trust_level = "official"
+
+[[sources]]
+id = "postgresql_indexes"
+url = "https://www.postgresql.org/docs/current/indexes.html"
+title = "PostgreSQL Indexes"
+domains = ["db", "storage"]
+product = "PostgreSQL"
+version = "current"
+license = "PostgreSQL License"
+trust_level = "official"
+
+[[sources]]
+id = "postgresql_explain"
+url = "https://www.postgresql.org/docs/current/using-explain.html"
+title = "PostgreSQL Query Plans and EXPLAIN"
+domains = ["db", "compile", "sys"]
+product = "PostgreSQL"
+version = "current"
+license = "PostgreSQL License"
+trust_level = "official"
+
+[[sources]]
+id = "linux_admin_guide"
+url = "https://www.kernel.org/doc/html/latest/admin-guide/index.html"
+title = "Linux Kernel Administration Guide"
+domains = ["sys", "security"]
+product = "Linux kernel"
+version = "latest"
+license = "GPL-2.0-only"
+trust_level = "official"
+
+[[sources]]
+id = "linux_memory_management"
+url = "https://www.kernel.org/doc/html/latest/mm/index.html"
+title = "Linux Memory Management Documentation"
+domains = ["sys", "hpc"]
+product = "Linux kernel"
+version = "latest"
+license = "GPL-2.0-only"
+trust_level = "official"
+
+[[sources]]
+id = "linux_kvm"
+url = "https://www.kernel.org/doc/html/latest/virt/kvm/index.html"
+title = "Linux KVM Documentation"
+domains = ["sys", "security", "cloud"]
+product = "Linux KVM"
+version = "latest"
+license = "GPL-2.0-only"
+trust_level = "official"
+
+[[sources]]
+id = "linux_userfaultfd"
+url = "https://www.kernel.org/doc/html/latest/admin-guide/mm/userfaultfd.html"
+title = "Linux userfaultfd"
+domains = ["sys", "security"]
+product = "Linux kernel"
+version = "latest"
+license = "GPL-2.0-only"
+trust_level = "official"
+
+[[sources]]
+id = "linux_fuse"
+url = "https://www.kernel.org/doc/html/latest/filesystems/fuse/index.html"
+title = "Linux FUSE"
+domains = ["sys", "storage", "security"]
+product = "Linux kernel"
+version = "latest"
+license = "GPL-2.0-only"
+trust_level = "official"
+
+[[sources]]
+id = "linux_virtio"
+url = "https://www.kernel.org/doc/html/latest/driver-api/virtio/virtio.html"
+title = "Virtio on Linux"
+domains = ["sys", "cloud", "hpc"]
+product = "Linux kernel"
+version = "latest"
+license = "GPL-2.0-only"
+trust_level = "official"
+
+[[sources]]
+id = "linux_networking"
+url = "https://www.kernel.org/doc/html/latest/networking/index.html"
+title = "Linux Kernel Networking Documentation"
+domains = ["sys", "distributed"]
+product = "Linux kernel"
+version = "latest"
+license = "GPL-2.0-only"
+trust_level = "official"
+
+[[sources]]
+id = "kubernetes_architecture"
+url = "https://kubernetes.io/docs/concepts/architecture/"
+title = "Kubernetes Cluster Architecture"
+domains = ["cloud", "distributed", "sys"]
+product = "Kubernetes"
+version = "current"
+license = "CC-BY-4.0"
+trust_level = "official"
+
+[[sources]]
+id = "kubernetes_scheduling"
+url = "https://kubernetes.io/docs/concepts/scheduling-eviction/"
+title = "Kubernetes Scheduling, Preemption and Eviction"
+domains = ["cloud", "distributed", "sys"]
+product = "Kubernetes"
+version = "current"
+license = "CC-BY-4.0"
+trust_level = "official"
+
+[[sources]]
+id = "kubernetes_networking"
+url = "https://kubernetes.io/docs/concepts/services-networking/"
+title = "Kubernetes Services, Load Balancing and Networking"
+domains = ["cloud", "distributed", "sys"]
+product = "Kubernetes"
+version = "current"
+license = "CC-BY-4.0"
+trust_level = "official"
+
+[[sources]]
+id = "kubernetes_cni"
+url = "https://kubernetes.io/docs/concepts/extend-kubernetes/compute-storage-net/network-plugins/"
+title = "Kubernetes Network Plugins and CNI"
+domains = ["cloud", "distributed", "sys"]
+product = "Kubernetes"
+version = "current"
+license = "CC-BY-4.0"
+trust_level = "official"
+
+[[sources]]
+id = "kubernetes_security"
+url = "https://kubernetes.io/docs/concepts/security/"
+title = "Kubernetes Security"
+domains = ["cloud", "security", "sys"]
+product = "Kubernetes"
+version = "current"
+license = "CC-BY-4.0"
+trust_level = "official"
+
+[[sources]]
+id = "llvm_optimizer"
+url = "https://www.llvm.org/docs/CommandGuide/opt.html"
+title = "LLVM Optimizer"
+domains = ["compile", "hpc"]
+product = "LLVM"
+version = "current"
+license = "Apache-2.0 WITH LLVM-exception"
+trust_level = "official"
+
+[[sources]]
+id = "llvm_codegen"
+url = "https://www.llvm.org/docs/CodeGenerator.html"
+title = "LLVM Target-Independent Code Generator"
+domains = ["compile", "sys", "hpc"]
+product = "LLVM"
+version = "current"
+license = "Apache-2.0 WITH LLVM-exception"
+trust_level = "official"
+
+[[sources]]
+id = "llvm_new_pass_manager"
+url = "https://www.llvm.org/docs/NewPassManager.html"
+title = "LLVM New Pass Manager"
+domains = ["compile"]
+product = "LLVM"
+version = "current"
+license = "Apache-2.0 WITH LLVM-exception"
+trust_level = "official"
+
+[[sources]]
+id = "pytorch_distributed"
+url = "https://docs.pytorch.org/docs/stable/distributed.html"
+title = "PyTorch Distributed Communication"
+domains = ["ai_workload", "distributed", "hpc", "sys"]
+product = "PyTorch"
+version = "stable"
+license = "BSD-3-Clause"
+trust_level = "official"
+
+[[sources]]
+id = "pytorch_cuda"
+url = "https://docs.pytorch.org/docs/stable/notes/cuda.html"
+title = "PyTorch CUDA Semantics"
+domains = ["ai_workload", "hpc", "sys"]
+product = "PyTorch"
+version = "stable"
+license = "BSD-3-Clause"
+trust_level = "official"
+
+[[sources]]
+id = "pytorch_compiler"
+url = "https://docs.pytorch.org/docs/stable/torch.compiler.html"
+title = "PyTorch Compiler"
+domains = ["ai_workload", "compile", "hpc"]
+product = "PyTorch"
+version = "stable"
+license = "BSD-3-Clause"
+trust_level = "official"
+
+[[sources]]
+id = "pytorch_distributed_checkpoint"
+url = "https://docs.pytorch.org/docs/stable/distributed.checkpoint.html"
+title = "PyTorch Distributed Checkpoint"
+domains = ["ai_workload", "distributed", "storage"]
+product = "PyTorch"
+version = "stable"
+license = "BSD-3-Clause"
+trust_level = "official"
+
+[[sources]]
+id = "nvidia_nccl_collectives"
+url = "https://docs.nvidia.com/deeplearning/nccl/user-guide/docs/usage/collectives.html"
+title = "NVIDIA NCCL Collective Operations"
+domains = ["ai_workload", "distributed", "hpc"]
+product = "NVIDIA NCCL"
+version = "current"
+license = "BSD-3-Clause"
+trust_level = "official"
+
+[[sources]]
+id = "nvidia_nccl_communicators"
+url = "https://docs.nvidia.com/deeplearning/nccl/user-guide/docs/usage/communicators.html"
+title = "NVIDIA NCCL Communicators and Fault Handling"
+domains = ["ai_workload", "distributed", "hpc", "sys"]
+product = "NVIDIA NCCL"
+version = "current"
+license = "BSD-3-Clause"
+trust_level = "official"
+
+[[sources]]
+id = "vllm_parallelism"
+url = "https://docs.vllm.ai/en/latest/serving/parallelism_scaling/"
+title = "vLLM Parallelism and Scaling"
+domains = ["ai_workload", "distributed", "hpc", "sys"]
+product = "vLLM"
+version = "latest"
+license = "Apache-2.0"
+trust_level = "official"
+
+[[sources]]
+id = "vllm_prefix_cache"
+url = "https://docs.vllm.ai/en/latest/features/automatic_prefix_caching/"
+title = "vLLM Automatic Prefix Caching"
+domains = ["ai_workload", "db", "storage", "sys"]
+product = "vLLM"
+version = "latest"
+license = "Apache-2.0"
+trust_level = "official"
+
+[[sources]]
+id = "vllm_quantized_kv_cache"
+url = "https://docs.vllm.ai/en/latest/features/quantization/quantized_kvcache/"
+title = "vLLM Quantized KV Cache"
+domains = ["ai_workload", "compile", "hpc", "sys"]
+product = "vLLM"
+version = "latest"
+license = "Apache-2.0"
+trust_level = "official"
+
+[[sources]]
+id = "vllm_disaggregated_prefill"
+url = "https://docs.vllm.ai/en/latest/features/disagg_prefill/"
+title = "vLLM Disaggregated Prefilling"
+domains = ["ai_workload", "distributed", "hpc", "sys"]
+product = "vLLM"
+version = "latest"
+license = "Apache-2.0"
+trust_level = "official"

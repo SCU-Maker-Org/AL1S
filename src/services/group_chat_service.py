@@ -147,8 +147,12 @@ class GroupChatService:
         if session_key.scope == "private":
             return session_key.knowledge_namespace
         if self.config.memory.namespace_scope == "group":
-            return f"group:{session_key.chat_id}"
-        return f"topic:{session_key.chat_id}:{session_key.thread_id}"
+            namespace = f"group:{session_key.chat_id}"
+        else:
+            namespace = f"topic:{session_key.chat_id}:{session_key.thread_id}"
+        if session_key.scope == "per_user":
+            namespace += f":user:{session_key.user_id}"
+        return namespace
 
     @staticmethod
     def _entity_text(message, entity, text: str) -> str:

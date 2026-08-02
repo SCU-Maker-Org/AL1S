@@ -4,6 +4,7 @@
 
 import inspect
 import time
+from pathlib import Path
 from typing import Optional
 
 from loguru import logger
@@ -34,6 +35,7 @@ class ChatHandler(BaseHandler):
         database_service=None,
         group_chat_service: GroupChatService = None,
         rate_limit_service: RateLimitService = None,
+        user_profile_service=None,
     ):
         super().__init__("ChatHandler", "处理用户聊天消息")
         self.agent_service = agent_service  # 统一的 Agent 服务接口
@@ -42,6 +44,7 @@ class ChatHandler(BaseHandler):
         self.database_service = database_service
         self.group_chat_service = group_chat_service
         self.rate_limit_service = rate_limit_service
+        self.user_profile_service = user_profile_service
 
         # 知识提取器现在集成在 Agent 服务的学习功能中
 
@@ -406,6 +409,20 @@ class ChatHandler(BaseHandler):
         thread_id = getattr(update.effective_message, "message_thread_id", None)
         return {"message_thread_id": thread_id} if thread_id is not None else {}
 
+    @staticmethod
+    def _media_capture_owner(update: Update) -> str:
+        """Build an update-specific owner key; MCPService stores only its HMAC."""
+        return ":".join(
+            str(value)
+            for value in (
+                "telegram",
+                getattr(update.effective_user, "id", "unknown"),
+                getattr(update.effective_chat, "id", "unknown"),
+                getattr(update, "update_id", "unknown"),
+                getattr(update.effective_message, "message_id", "unknown"),
+            )
+        )
+
     async def _bot_identity(self, context) -> tuple[str, int]:
         username = getattr(context.bot, "username", None)
         bot_id = getattr(context.bot, "id", None)
@@ -430,6 +447,54 @@ class ChatHandler(BaseHandler):
                 text=text,
                 **kwargs,
             )
+
+    async def _send_media_artifacts(
+        self, update: Update, context, artifacts, *, owner: str
+    ) -> None:
+        """将已验证的 MCP 产物发送到当前 Telegram 会话。"""
+        if not artifacts or not self.mcp_service:
+            return
+        reply_kwargs = {
+            "chat_id": update.effective_chat.id,
+            "reply_to_message_id": update.effective_message.message_id,
+            **self._topic_kwargs(update),
+        }
+        for artifact in artifacts:
+            try:
+                with self.mcp_service.consume_media_artifact(
+                    artifact, owner=owner
+                ) as media_file:
+                    if artifact.kind == "photo":
+                        await context.bot.send_photo(
+                            photo=media_file,
+                            filename=Path(artifact.relative_path).name,
+                            caption=artifact.caption or None,
+                            **reply_kwargs,
+                        )
+                    elif artifact.kind == "voice":
+                        await context.bot.send_voice(
+                            voice=media_file,
+                            filename=Path(artifact.relative_path).name,
+                            caption=artifact.caption or None,
+                            **reply_kwargs,
+                        )
+                logger.info(
+                    "telegram_media_sent artifact_id={} kind={} bytes={}",
+                    artifact.artifact_id,
+                    artifact.kind,
+                    artifact.byte_size,
+                )
+            except Exception as exc:
+                logger.exception(
+                    "发送 MCP 媒体失败 artifact_id={} kind={}: {}",
+                    getattr(artifact, "artifact_id", "unknown"),
+                    getattr(artifact, "kind", "unknown"),
+                    exc,
+                )
+                await context.bot.send_message(
+                    text="媒体已经生成，但 Telegram 发送失败。请稍后重试。",
+                    **reply_kwargs,
+                )
 
     async def handle(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
         """先执行群策略，再为允许的消息创建后台 Agent 任务。"""
@@ -620,6 +685,12 @@ class ChatHandler(BaseHandler):
                 if hasattr(self.agent_service, "set_conversation_id"):
                     self.agent_service.set_conversation_id(conversation_id)
                 system_prompt = self._build_system_prompt_with_rag(role, [])
+                if self.user_profile_service and session_key.scope == "private":
+                    system_prompt += (
+                        await self.user_profile_service.build_prompt_context(
+                            telegram_user_id
+                        )
+                    )
                 if group_context:
                     system_prompt += (
                         "\n\n以下是同一群和 Topic 内的短期旁听上下文，仅用于理解当前问题，"
@@ -637,24 +708,27 @@ class ChatHandler(BaseHandler):
                 else:
                     tool_access = "public"
                     tools = []
+                session_namespace = (
+                    self.group_chat_service.knowledge_namespace(session_key)
+                    if self.group_chat_service
+                    else session_key.knowledge_namespace
+                )
+                include_session_memory = session_key.scope == "private" or bool(
+                    self.group_chat_service
+                    and self.group_chat_service.memory_enabled(session_key.chat_id)
+                )
                 call_kwargs = {
                     "messages": messages,
                     "tools": tools or None,
                     "tool_access": tool_access,
                     "knowledge_namespace": (
-                        self.group_chat_service.knowledge_namespace(session_key)
-                        if self.group_chat_service
-                        else session_key.knowledge_namespace
+                        session_namespace if include_session_memory else None
                     ),
-                    "enable_rag": (
-                        session_key.scope == "private"
-                        or bool(
-                            self.group_chat_service
-                            and self.group_chat_service.memory_enabled(
-                                session_key.chat_id
-                            )
-                        )
-                    ),
+                    "knowledge_namespaces": [
+                        config.rag.technical_namespace,
+                        *([session_namespace] if include_session_memory else []),
+                    ],
+                    "enable_rag": config.rag.enabled,
                 }
                 signature = inspect.signature(self.agent_service.chat_completion)
                 supported_kwargs = {
@@ -662,15 +736,47 @@ class ChatHandler(BaseHandler):
                     for key, value in call_kwargs.items()
                     if key in signature.parameters
                 }
-                agent_answer = await self.agent_service.chat_completion(
-                    **supported_kwargs
-                )
+                media_capture_token = None
+                media_artifacts = []
+                media_owner = self._media_capture_owner(update)
+                if self.mcp_service:
+                    media_capture_token = self.mcp_service.begin_media_capture(
+                        media_owner
+                    )
+                try:
+                    try:
+                        agent_answer = await self.agent_service.chat_completion(
+                            **supported_kwargs
+                        )
+                    finally:
+                        if self.mcp_service and media_capture_token is not None:
+                            media_artifacts = self.mcp_service.finish_media_capture(
+                                media_capture_token
+                            )
+                except BaseException:
+                    if self.mcp_service:
+                        self.mcp_service.cleanup_media_artifacts(
+                            media_artifacts, owner=media_owner
+                        )
+                    raise
                 if not agent_answer:
                     agent_answer = "抱歉，Agent 未能生成有效回复，请稍后重试。"
 
-                await self._replace_placeholder(
-                    update, context, placeholder_message_id, agent_answer
-                )
+                try:
+                    await self._replace_placeholder(
+                        update, context, placeholder_message_id, agent_answer
+                    )
+                    await self._send_media_artifacts(
+                        update,
+                        context,
+                        media_artifacts,
+                        owner=media_owner,
+                    )
+                finally:
+                    if self.mcp_service:
+                        self.mcp_service.cleanup_media_artifacts(
+                            media_artifacts, owner=media_owner
+                        )
                 bot_message = Message(
                     role="assistant", content=agent_answer, timestamp=time.time()
                 )

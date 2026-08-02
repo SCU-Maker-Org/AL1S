@@ -41,6 +41,26 @@ def test_private_message_triggers(update_factory):
     assert result.trigger_type == TriggerType.PRIVATE
 
 
+@pytest.mark.parametrize("namespace_scope", ["group", "topic"])
+def test_per_user_long_term_namespaces_are_owner_isolated(
+    update_factory, namespace_scope
+):
+    config = TelegramGroupConfig(
+        session_scope="per_user",
+        memory={"namespace_scope": namespace_scope},
+    )
+    service = GroupChatService(config)
+    first = service.session_key(update_factory(user_id=101))
+    second = service.session_key(update_factory(user_id=202))
+
+    first_namespace = service.knowledge_namespace(first)
+    second_namespace = service.knowledge_namespace(second)
+
+    assert first_namespace != second_namespace
+    assert first_namespace.endswith(":user:101")
+    assert second_namespace.endswith(":user:202")
+
+
 def test_plain_group_message_does_not_trigger(update_factory):
     result = decide(GroupChatService(TelegramGroupConfig()), update_factory())
     assert not result.allowed

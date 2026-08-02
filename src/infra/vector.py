@@ -6,9 +6,12 @@
 """
 
 import asyncio
+import fcntl
 import json
 import os
 import pickle
+import uuid
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -16,7 +19,16 @@ from loguru import logger
 
 os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 
-# 向量存储后端
+# On Apple Silicon, importing FAISS before PyTorch can load conflicting OpenMP
+# runtimes and segfault during model construction (pytorch/pytorch#149201).
+try:
+    from sentence_transformers import SentenceTransformer
+
+    SENTENCE_TRANSFORMERS_AVAILABLE = True
+except ImportError:
+    SENTENCE_TRANSFORMERS_AVAILABLE = False
+    logger.warning("sentence-transformers 未安装，Sentence Transformer 功能不可用")
+
 try:
     import faiss
 
@@ -34,16 +46,12 @@ except ImportError:
     SKLEARN_AVAILABLE = False
     logger.warning("scikit-learn 未安装，TF-IDF 功能不可用")
 
-try:
-    from sentence_transformers import SentenceTransformer
-
-    SENTENCE_TRANSFORMERS_AVAILABLE = True
-except ImportError:
-    SENTENCE_TRANSFORMERS_AVAILABLE = False
-    logger.warning("sentence-transformers 未安装，Sentence Transformer 功能不可用")
-
 from ..config import config
 from ..models import KnowledgeEntry
+
+
+class _IndexGenerationChanged(RuntimeError):
+    """磁盘索引已被另一个进程替换。"""
 
 
 class EmbeddingModel:
@@ -210,6 +218,12 @@ class VectorStore:
         elif self.backend == "memory":
             self.vectors = []
 
+    @property
+    def size(self) -> int:
+        if self.backend == "faiss":
+            return int(self.index.ntotal)
+        return len(self.vectors)
+
     async def add_vectors(
         self, vectors: List[List[float]], metadata: List[Dict[str, Any]]
     ):
@@ -261,8 +275,17 @@ class VectorStore:
             query_array = np.array(query_vector)
             similarities = np.dot(vectors_array, query_array)
 
-            # 获取top_k结果
-            top_indices = np.argsort(similarities)[::-1][:top_k]
+            # 只排序候选集合，避免大内存索引为很小的 top_k 做全量排序。
+            candidate_count = min(max(top_k, 0), len(similarities))
+            if candidate_count == 0:
+                return []
+            if candidate_count == len(similarities):
+                top_indices = np.argsort(similarities)[::-1]
+            else:
+                candidates = np.argpartition(similarities, -candidate_count)[
+                    -candidate_count:
+                ]
+                top_indices = candidates[np.argsort(similarities[candidates])[::-1]]
 
             results = []
             for idx in top_indices:
@@ -274,23 +297,50 @@ class VectorStore:
         return []
 
     def save(self, file_path: str) -> bool:
-        """保存向量存储"""
+        """以同目录临时文件保存，避免读者观察到半写入的单个文件。"""
+        temporary_paths: List[Path] = []
         try:
+            destination = Path(file_path)
+            token = f"{os.getpid()}-{uuid.uuid4().hex}"
             if self.backend == "faiss":
-                faiss.write_index(self.index, f"{file_path}.faiss")
+                vector_path = destination.with_suffix(".faiss")
+                vector_temp = vector_path.with_name(f".{vector_path.name}.{token}.tmp")
+                temporary_paths.append(vector_temp)
+                faiss.write_index(self.index, str(vector_temp))
+                os.replace(vector_temp, vector_path)
             elif self.backend == "memory":
-                with open(f"{file_path}.pkl", "wb") as f:
+                vector_path = destination.with_suffix(".pkl")
+                vector_temp = vector_path.with_name(f".{vector_path.name}.{token}.tmp")
+                temporary_paths.append(vector_temp)
+                with open(vector_temp, "wb") as f:
                     pickle.dump(self.vectors, f)
+                    f.flush()
+                    os.fsync(f.fileno())
+                os.replace(vector_temp, vector_path)
 
             # 保存元数据
-            with open(f"{file_path}_metadata.json", "w", encoding="utf-8") as f:
+            metadata_path = Path(f"{file_path}_metadata.json")
+            metadata_temp = metadata_path.with_name(
+                f".{metadata_path.name}.{token}.tmp"
+            )
+            temporary_paths.append(metadata_temp)
+            with open(metadata_temp, "w", encoding="utf-8") as f:
                 json.dump(self.metadata, f, ensure_ascii=False, indent=2)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(metadata_temp, metadata_path)
 
             logger.info(f"向量存储已保存到: {file_path}")
             return True
         except Exception as e:
             logger.error(f"保存向量存储失败: {e}")
             return False
+        finally:
+            for temporary_path in temporary_paths:
+                try:
+                    temporary_path.unlink(missing_ok=True)
+                except OSError:
+                    pass
 
     def load(self, file_path: str) -> bool:
         """加载向量存储"""
@@ -356,7 +406,9 @@ class VectorStore:
 class VectorService:
     """向量存储服务"""
 
-    INDEX_SCHEMA_VERSION = 3
+    INDEX_SCHEMA_VERSION = 5
+    MAX_FILTER_SCAN = 4096
+    REBUILD_SAVE_ATTEMPTS = 3
 
     def __init__(
         self, database_service=None, vector_store_path: str = "data/vector_store"
@@ -369,6 +421,8 @@ class VectorService:
         self.embedding_model = None
         self.vector_store = None
         self._initialized = False
+        self._index_lock = asyncio.Lock()
+        self._loaded_generation: Optional[str] = None
 
     async def initialize(
         self,
@@ -377,6 +431,7 @@ class VectorService:
         embedding_revision: Optional[str] = None,
         embedding_device: str = "cpu",
         embedding_batch_size: int = 8,
+        force_rebuild: bool = False,
     ) -> bool:
         """初始化向量服务"""
         try:
@@ -406,8 +461,13 @@ class VectorService:
                 backend=vector_store_backend, dimension=self.embedding_model.dimension
             )
 
-            # 加载现有数据
-            if not await self._load_existing_data():
+            # 摄取 CLI 可直接从 SQLite 构建一次，避免先加载/重建旧索引后再重复编码。
+            initialized_data = (
+                await self._rebuild_from_database()
+                if force_rebuild
+                else await self._load_existing_data()
+            )
+            if not initialized_data:
                 return False
 
             self._initialized = True
@@ -418,7 +478,7 @@ class VectorService:
             logger.error(f"向量服务初始化失败: {e}")
             return False
 
-    def _index_manifest(self) -> Dict[str, Any]:
+    def _index_manifest(self, generation: Optional[str] = None) -> Dict[str, Any]:
         return {
             "schema_version": self.INDEX_SCHEMA_VERSION,
             "backend": self.vector_store.backend,
@@ -428,37 +488,148 @@ class VectorService:
             "normalized": self.embedding_model.normalized,
             "query_prompt": self.embedding_model.query_prompt_name,
             "query_prompt_text": self.embedding_model.query_prompt,
+            "generation": (
+                self._loaded_generation if generation is None else generation
+            ),
         }
 
     @property
     def _manifest_path(self) -> Path:
         return self.vector_store_path / "vector_store_manifest.json"
 
+    @property
+    def _process_lock_path(self) -> Path:
+        return self.vector_store_path / ".vector_store.lock"
+
+    @contextmanager
+    def _process_index_lock(self, *, exclusive: bool):
+        """序列化跨进程的索引文件读取与提交。"""
+        self.vector_store_path.mkdir(exist_ok=True, parents=True)
+        descriptor = os.open(self._process_lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+        with os.fdopen(descriptor, "a+b") as lock_file:
+            operation = fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH
+            fcntl.flock(lock_file.fileno(), operation)
+            try:
+                yield
+            finally:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
+    def _read_manifest_unlocked(self) -> Optional[Dict[str, Any]]:
+        try:
+            with open(self._manifest_path, "r", encoding="utf-8") as f:
+                manifest = json.load(f)
+            return manifest if isinstance(manifest, dict) else None
+        except (FileNotFoundError, OSError, ValueError, TypeError):
+            return None
+
+    @staticmethod
+    def _manifest_generation(manifest: Optional[Dict[str, Any]]) -> Optional[str]:
+        if not manifest:
+            return None
+        generation = manifest.get("generation")
+        return generation if isinstance(generation, str) and generation else None
+
+    def _manifest_model_matches(self, manifest: Optional[Dict[str, Any]]) -> bool:
+        if not manifest or not self._manifest_generation(manifest):
+            return False
+        expected = self._index_manifest(generation=manifest["generation"])
+        return manifest == expected
+
     def _manifest_matches(self) -> bool:
         if self.embedding_model.model_type == "tfidf":
             return False
-        try:
-            if not self._manifest_path.exists():
-                return False
-            with open(self._manifest_path, "r", encoding="utf-8") as f:
-                existing = json.load(f)
-            return existing == self._index_manifest()
-        except (OSError, ValueError, TypeError):
-            return False
+        with self._process_index_lock(exclusive=False):
+            return self._manifest_model_matches(self._read_manifest_unlocked())
 
-    def _save_vector_store(self) -> bool:
-        store_file = self.vector_store_path / "vector_store"
-        if not self.vector_store.save(str(store_file)):
-            return False
-        manifest_temp = self._manifest_path.with_suffix(".json.tmp")
-        try:
-            with open(manifest_temp, "w", encoding="utf-8") as f:
-                json.dump(self._index_manifest(), f, ensure_ascii=False, indent=2)
-            manifest_temp.replace(self._manifest_path)
+    def _read_disk_generation(self) -> Optional[str]:
+        with self._process_index_lock(exclusive=False):
+            return self._manifest_generation(self._read_manifest_unlocked())
+
+    def _load_compatible_store(self) -> bool:
+        with self._process_index_lock(exclusive=False):
+            manifest = self._read_manifest_unlocked()
+            if not self._manifest_model_matches(manifest):
+                return False
+            generation = self._manifest_generation(manifest)
+            if not self.vector_store.load(str(self._snapshot_store_file(generation))):
+                return False
+            self._loaded_generation = generation
             return True
-        except OSError as e:
-            logger.error(f"保存向量索引清单失败: {e}")
-            return False
+
+    def _snapshot_store_file(self, generation: Optional[str]) -> Path:
+        if generation:
+            return self.vector_store_path / f"vector_store-{generation}"
+        return self.vector_store_path / "vector_store"
+
+    @staticmethod
+    def _store_artifact_paths(store_file: Path) -> Tuple[Path, Path, Path]:
+        return (
+            store_file.with_suffix(".faiss"),
+            store_file.with_suffix(".pkl"),
+            Path(f"{store_file}_metadata.json"),
+        )
+
+    def _remove_store_artifacts(self, store_file: Path) -> None:
+        for path in self._store_artifact_paths(store_file):
+            try:
+                path.unlink(missing_ok=True)
+            except OSError as e:
+                logger.warning("清理旧向量索引文件失败 {}: {}", path, e)
+
+    def _remove_obsolete_snapshot(self, previous_generation: Optional[str]) -> None:
+        if previous_generation:
+            self._remove_store_artifacts(self._snapshot_store_file(previous_generation))
+        self._remove_store_artifacts(self._snapshot_store_file(None))
+
+    def _save_vector_store(self, expected_generation: Optional[str]) -> bool:
+        """CAS 提交索引；磁盘版本变化时拒绝旧进程覆盖。"""
+        with self._process_index_lock(exclusive=True):
+            disk_generation = self._manifest_generation(self._read_manifest_unlocked())
+            if disk_generation != expected_generation:
+                raise _IndexGenerationChanged(
+                    f"expected={expected_generation!r}, actual={disk_generation!r}"
+                )
+
+            generation = uuid.uuid4().hex
+            store_file = self._snapshot_store_file(generation)
+            if not self.vector_store.save(str(store_file)):
+                self._remove_store_artifacts(store_file)
+                return False
+
+            token = f"{os.getpid()}-{uuid.uuid4().hex}"
+            manifest_temp = self._manifest_path.with_name(
+                f".{self._manifest_path.name}.{token}.tmp"
+            )
+            try:
+                with open(manifest_temp, "w", encoding="utf-8") as f:
+                    json.dump(
+                        self._index_manifest(generation=generation),
+                        f,
+                        ensure_ascii=False,
+                        indent=2,
+                    )
+                    f.flush()
+                    os.fsync(f.fileno())
+                os.replace(manifest_temp, self._manifest_path)
+                for path in (
+                    *self._store_artifact_paths(store_file),
+                    self._manifest_path,
+                    self._process_lock_path,
+                ):
+                    if path.exists():
+                        os.chmod(path, 0o600)
+                self._loaded_generation = generation
+                self._remove_obsolete_snapshot(disk_generation)
+                return True
+            except OSError as e:
+                logger.error(f"保存向量索引清单失败: {e}")
+                self._remove_store_artifacts(store_file)
+                return False
+            finally:
+                try:
+                    manifest_temp.unlink(missing_ok=True)
+                except OSError:
+                    pass
 
     async def _load_existing_data(self) -> bool:
         """加载现有的向量数据"""
@@ -466,10 +637,11 @@ class VectorService:
             # 尝试从文件加载
             store_file = self.vector_store_path / "vector_store"
             if (
-                store_file.with_suffix(".faiss").exists()
+                self._manifest_path.exists()
+                or store_file.with_suffix(".faiss").exists()
                 or store_file.with_suffix(".pkl").exists()
             ):
-                if self._manifest_matches() and self.vector_store.load(str(store_file)):
+                if await asyncio.to_thread(self._load_compatible_store):
                     await self._hydrate_knowledge_namespaces()
                     logger.info("已加载兼容的向量存储")
                     return True
@@ -503,62 +675,142 @@ class VectorService:
                 metadata["knowledge_namespace"] = namespaces.get(metadata.get("id"), "")
                 changed = True
         if changed:
-            self._save_vector_store()
+            try:
+                saved = await asyncio.to_thread(
+                    self._save_vector_store, self._loaded_generation
+                )
+            except _IndexGenerationChanged:
+                logger.info("补齐命名空间时索引已更新，改为从数据库重建")
+                await self._rebuild_from_database()
+            else:
+                if not saved:
+                    logger.error("保存补齐命名空间后的向量索引失败")
 
     async def _rebuild_from_database(self) -> bool:
         """从数据库重建向量存储"""
-        try:
-            # 获取所有知识条目
-            knowledge_entries = await asyncio.to_thread(
-                self.database_service.get_all_knowledge_entries
-            )
-
-            self.vector_store.reset()
-
-            if not knowledge_entries:
-                logger.info("数据库中没有知识条目")
-                return self._save_vector_store()
-
-            # 准备文本和元数据
-            texts = []
-            metadata = []
-
-            for entry in knowledge_entries:
-                # 组合文本内容
-                content = f"{entry.get('title', '')} {entry.get('content', '')} {entry.get('summary', '')}"
-                texts.append(content.strip())
-                metadata.append(
-                    {
-                        "id": entry.get("id"),
-                        "title": entry.get("title", ""),
-                        "content": entry.get("content", ""),
-                        "summary": entry.get("summary", ""),
-                        "keywords": entry.get("keywords", ""),
-                        "category": entry.get("category", "general"),
-                        "importance_score": entry.get("importance_score", 0.0),
-                        "knowledge_namespace": entry.get("knowledge_namespace", ""),
-                    }
+        for attempt in range(1, self.REBUILD_SAVE_ATTEMPTS + 1):
+            try:
+                expected_generation = await asyncio.to_thread(
+                    self._read_disk_generation
                 )
 
-            # 训练嵌入模型
-            await self.embedding_model.fit(texts)
+                # 获取所有知识条目
+                knowledge_entries = await asyncio.to_thread(
+                    self.database_service.get_all_knowledge_entries
+                )
+                rag_chunks = []
+                if hasattr(self.database_service, "get_all_rag_chunks"):
+                    rag_chunks = await asyncio.to_thread(
+                        self.database_service.get_all_rag_chunks
+                    )
 
-            # 生成向量
-            vectors = await self.embedding_model.encode(texts)
+                # 准备文本和元数据
+                texts = []
+                metadata = []
 
-            # 添加到向量存储
-            await self.vector_store.add_vectors(vectors, metadata)
+                for entry in knowledge_entries:
+                    content = (
+                        f"{entry.get('title', '')} {entry.get('content', '')} "
+                        f"{entry.get('summary', '')}"
+                    )
+                    texts.append(content.strip())
+                    metadata.append(
+                        {
+                            "id": entry.get("id"),
+                            "title": entry.get("title", ""),
+                            "content": entry.get("content", ""),
+                            "summary": entry.get("summary", ""),
+                            "keywords": entry.get("keywords", ""),
+                            "category": entry.get("category", "general"),
+                            "importance_score": entry.get("importance_score", 0.0),
+                            "knowledge_namespace": entry.get("knowledge_namespace", ""),
+                            "record_type": "conversation_memory",
+                        }
+                    )
 
-            # 保存到文件
-            if not self._save_vector_store():
+                for chunk in rag_chunks:
+                    heading = chunk.get("heading_path", "")
+                    title = chunk.get("title", "")
+                    content = chunk.get("content", "")
+                    texts.append(f"{title} {heading} {content}".strip())
+                    metadata.append(
+                        {
+                            "id": f"rag:{chunk.get('chunk_id')}",
+                            "chunk_id": chunk.get("chunk_id"),
+                            "document_id": chunk.get("document_id"),
+                            "title": title,
+                            "content": content,
+                            "summary": "",
+                            "keywords": " ".join(
+                                value
+                                for value in (
+                                    chunk.get("domain", ""),
+                                    chunk.get("subdomain", ""),
+                                    chunk.get("product", ""),
+                                )
+                                if value
+                            ),
+                            "category": chunk.get("domain", ""),
+                            "importance_score": min(
+                                max(
+                                    float(chunk.get("trust_level", 50)) / 100.0,
+                                    0.0,
+                                ),
+                                1.0,
+                            ),
+                            "knowledge_namespace": chunk.get("knowledge_namespace", ""),
+                            "collection": chunk.get("collection", ""),
+                            "source_uri": chunk.get("source_uri", ""),
+                            "heading_path": heading,
+                            "version": chunk.get("version", ""),
+                            "product": chunk.get("product", ""),
+                            "license": chunk.get("license", ""),
+                            "trust_level": chunk.get("trust_level", 50),
+                            "record_type": "document_chunk",
+                        }
+                    )
+
+                if texts:
+                    await self.embedding_model.fit(texts)
+                    vectors = await self.embedding_model.encode(texts)
+                else:
+                    vectors = []
+
+                # 编码成功后再替换内存索引，避免模型异常提前清空旧索引。
+                self.vector_store.reset()
+                if len(vectors):
+                    await self.vector_store.add_vectors(vectors, metadata)
+
+                try:
+                    saved = await asyncio.to_thread(
+                        self._save_vector_store, expected_generation
+                    )
+                except _IndexGenerationChanged:
+                    logger.warning(
+                        "重建提交时发现索引 generation 已变化，第 {}/{} 次重试",
+                        attempt,
+                        self.REBUILD_SAVE_ATTEMPTS,
+                    )
+                    continue
+                if not saved:
+                    return False
+
+                if not texts:
+                    logger.info("数据库中没有知识条目或文档分块")
+                else:
+                    logger.info(
+                        "从数据库重建了 {} 个向量（聊天知识 {}，文档分块 {}）",
+                        len(texts),
+                        len(knowledge_entries),
+                        len(rag_chunks),
+                    )
+                return True
+            except Exception as e:
+                logger.error(f"从数据库重建向量存储失败: {e}")
                 return False
 
-            logger.info(f"从数据库重建了 {len(texts)} 个向量")
-            return True
-
-        except Exception as e:
-            logger.error(f"从数据库重建向量存储失败: {e}")
-            return False
+        logger.error("索引持续被其他进程更新，重建提交已放弃")
+        return False
 
     async def add_knowledge(self, knowledge_entry: KnowledgeEntry) -> bool:
         """添加知识条目"""
@@ -575,18 +827,32 @@ class VectorService:
                 if not self.database_service:
                     logger.error("TF-IDF 添加知识需要数据库服务以重建词表")
                     return False
-                return await self._rebuild_from_database()
+                async with self._index_lock:
+                    return await self._rebuild_from_database()
 
-            # 生成向量
-            vector = await self.embedding_model.encode_single(content.strip())
+            async with self._index_lock:
+                disk_generation = await asyncio.to_thread(self._read_disk_generation)
+                if disk_generation != self._loaded_generation:
+                    logger.info("检测到外部索引更新，增量写入前先从数据库重建")
+                    return await self._rebuild_from_database()
 
-            # 添加到向量存储
-            metadata = [knowledge_entry.to_dict()]
-            await self.vector_store.add_vectors([vector], metadata)
+                # 生成向量
+                vector = await self.embedding_model.encode_single(content.strip())
 
-            # 保存到文件
-            if not self._save_vector_store():
-                return False
+                # 添加到向量存储
+                item = knowledge_entry.to_dict()
+                item["record_type"] = "conversation_memory"
+                await self.vector_store.add_vectors([vector], [item])
+
+                try:
+                    saved = await asyncio.to_thread(
+                        self._save_vector_store, self._loaded_generation
+                    )
+                except _IndexGenerationChanged:
+                    logger.info("增量编码期间索引被外部重建，改为从数据库重建")
+                    return await self._rebuild_from_database()
+                if not saved:
+                    return False
 
             logger.debug(f"添加知识条目: {knowledge_entry.title}")
             return True
@@ -601,8 +867,11 @@ class VectorService:
         top_k: int = 5,
         threshold: float = 0.1,
         knowledge_namespace: Optional[str] = None,
+        knowledge_namespaces: Optional[List[str]] = None,
+        collections: Optional[List[str]] = None,
+        hybrid_search: Optional[bool] = None,
     ) -> List[Dict[str, Any]]:
-        """搜索相关知识"""
+        """融合稠密向量与 FTS5 排名，并在 Top-K 前执行作用域过滤。"""
         try:
             if not self._initialized:
                 logger.warning("向量服务未初始化")
@@ -613,27 +882,123 @@ class VectorService:
                 query, is_query=True
             )
 
-            # 搜索相似向量
-            search_size = (
-                top_k if knowledge_namespace is None else max(top_k * 10, top_k)
-            )
-            results = await self.vector_store.search(
-                query_vector, search_size, threshold
-            )
+            namespaces = list(knowledge_namespaces or [])
+            if (
+                knowledge_namespace is not None
+                and knowledge_namespace not in namespaces
+            ):
+                namespaces.append(knowledge_namespace)
 
-            # 格式化结果
-            knowledge_results = []
-            for idx, score, metadata in results:
-                if (
-                    knowledge_namespace is not None
-                    and metadata.get("knowledge_namespace", "") != knowledge_namespace
-                ):
-                    continue
-                result = metadata.copy()
-                result["similarity_score"] = score
-                knowledge_results.append(result)
-                if len(knowledge_results) >= top_k:
-                    break
+            candidate_k = max(top_k, int(config.rag.candidate_k))
+            async with self._index_lock:
+                store_size = self.vector_store.size
+                filtered_search = bool(namespaces or collections)
+                max_scan = min(store_size, self.MAX_FILTER_SCAN)
+                if filtered_search:
+                    search_size = min(
+                        max_scan,
+                        max(candidate_k * 4, candidate_k),
+                    )
+                else:
+                    search_size = min(store_size, candidate_k)
+
+                dense_results = []
+                while search_size > 0:
+                    results = await self.vector_store.search(
+                        query_vector, search_size, threshold
+                    )
+                    dense_results = []
+                    for _, score, metadata in results:
+                        if (
+                            namespaces
+                            and metadata.get("knowledge_namespace", "")
+                            not in namespaces
+                        ):
+                            continue
+                        if (
+                            collections
+                            and metadata.get("collection", "") not in collections
+                        ):
+                            continue
+                        item = metadata.copy()
+                        item["similarity_score"] = score
+                        dense_results.append(item)
+                        if len(dense_results) >= candidate_k:
+                            break
+
+                    if (
+                        not filtered_search
+                        or len(dense_results) >= top_k
+                        or search_size >= max_scan
+                    ):
+                        break
+                    search_size = min(max_scan, search_size * 2)
+
+            use_hybrid = (
+                config.rag.hybrid_search if hybrid_search is None else hybrid_search
+            )
+            lexical_results = []
+            if (
+                use_hybrid
+                and self.database_service
+                and hasattr(self.database_service, "search_rag_chunks_lexical")
+            ):
+                lexical_results = await asyncio.to_thread(
+                    self.database_service.search_rag_chunks_lexical,
+                    query,
+                    limit=candidate_k,
+                    collections=collections,
+                    knowledge_namespaces=namespaces or None,
+                )
+
+            rrf_k = float(config.rag.rrf_k)
+            fused: Dict[str, Dict[str, Any]] = {}
+
+            def result_key(item: Dict[str, Any]) -> str:
+                chunk_id = item.get("chunk_id")
+                if chunk_id is not None:
+                    return f"document_chunk:{chunk_id}"
+                return f"conversation_memory:{item.get('id')}"
+
+            for rank, item in enumerate(dense_results, 1):
+                key = result_key(item)
+                fused[key] = dict(item)
+                fused[key]["retrieval_score"] = 1.0 / (rrf_k + rank)
+                fused[key]["dense_rank"] = rank
+
+            for rank, item in enumerate(lexical_results, 1):
+                key = result_key(item)
+                if key not in fused:
+                    fused[key] = {
+                        **item,
+                        "id": f"rag:{item.get('chunk_id')}",
+                        "summary": "",
+                        "keywords": " ".join(
+                            value
+                            for value in (
+                                item.get("domain", ""),
+                                item.get("subdomain", ""),
+                                item.get("product", ""),
+                            )
+                            if value
+                        ),
+                        "category": item.get("domain", ""),
+                        "record_type": "document_chunk",
+                        "similarity_score": 0.0,
+                        "retrieval_score": 0.0,
+                    }
+                fused[key]["retrieval_score"] += 1.0 / (rrf_k + rank)
+                fused[key]["lexical_rank"] = rank
+
+            knowledge_results = sorted(
+                fused.values(),
+                key=lambda item: (
+                    float(item.get("retrieval_score", 0.0)),
+                    float(item.get("similarity_score", 0.0)),
+                    float(item.get("trust_level", 0.0)),
+                ),
+                reverse=True,
+            )[:top_k]
 
             logger.debug(f"搜索到 {len(knowledge_results)} 个相关知识")
             return knowledge_results
@@ -642,13 +1007,16 @@ class VectorService:
             logger.error(f"搜索知识失败: {e}")
             return []
 
+    async def rebuild(self) -> bool:
+        """串行化地从 SQLite 重建完整稠密索引。"""
+        if not self.database_service or not self.vector_store:
+            return False
+        async with self._index_lock:
+            return await self._rebuild_from_database()
+
     def cleanup(self):
         """清理资源"""
         try:
-            if self.vector_store and self._initialized:
-                # 保存当前状态
-                self._save_vector_store()
-
             if self.embedding_model:
                 del self.embedding_model
                 self.embedding_model = None

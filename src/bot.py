@@ -3,6 +3,9 @@ Telegram机器人主类
 """
 
 import asyncio
+import html
+import io
+from pathlib import Path
 from typing import Dict, Optional
 
 from loguru import logger
@@ -28,6 +31,10 @@ from .services.ascii2d_service import Ascii2DService
 from .services.conversation_service import ConversationService
 from .services.group_chat_service import GroupChatService
 from .services.rate_limit_service import RateLimitService
+from .services.user_profile_service import (
+    ProfileValidationError,
+    UserProfileService,
+)
 from .utils.database_logger import init_database_logger
 
 
@@ -66,7 +73,13 @@ class AL1SBot:
             "knowledge": "管理知识库",
             "learn": "自动学习说明",
             "forget": "知识清理说明",
-            "rebuild_index": "索引重建说明",
+            "rebuild_index": "重建完整知识索引",
+        },
+        "profile": {
+            "profile": "查看个人画像状态或模板",
+            "profile_set": "替换我的私有画像",
+            "profile_add": "追加我的私有画像",
+            "profile_clear": "清除我的私有画像",
         },
         "group": {
             "group_status": "查看当前群聊配置",
@@ -91,7 +104,15 @@ class AL1SBot:
         self.application: Optional[Application] = None
 
         # 初始化MCP服务
-        self.mcp_service = MCPService() if config.mcp.enabled else None
+        self.mcp_service = (
+            MCPService(
+                media_output_dir=config.media.output_dir,
+                max_media_bytes=config.media.max_artifact_bytes,
+                max_media_ttl_seconds=config.media.retention_seconds,
+            )
+            if config.mcp.enabled
+            else None
+        )
 
         # 初始化服务（传入MCP工具处理器）
         self.database_service = DatabaseService()
@@ -105,6 +126,11 @@ class AL1SBot:
         )
         self.group_chat_service = GroupChatService(config.telegram.group)
         self.rate_limit_service = RateLimitService(config.telegram.rate_limit)
+        self.user_profile_service = (
+            UserProfileService(self.database_service, config.profile)
+            if config.profile.enabled
+            else None
+        )
 
         # 根据配置选择 Agent 类型（互斥）
         self.unified_agent_service = None
@@ -149,6 +175,7 @@ class AL1SBot:
             self.database_service,
             self.group_chat_service,
             self.rate_limit_service,
+            self.user_profile_service,
         )
         self.image_handler = ImageHandler(
             self.ascii2d_service,
@@ -178,11 +205,38 @@ class AL1SBot:
         """初始化MCP服务器"""
         if self.mcp_service and self.config.mcp.enabled:
             # 转换配置格式
-            mcp_configs = [
-                server_config
-                for server_config in self.config.mcp.servers
-                if server_config.enabled
-            ]
+            mcp_configs = []
+            for configured_server in self.config.mcp.servers:
+                if not configured_server.enabled:
+                    continue
+                if configured_server.name != "media":
+                    mcp_configs.append(configured_server)
+                    continue
+                if not self.config.media.enabled:
+                    logger.info("Media MCP 未启用")
+                    continue
+                if not self.config.media.api_key:
+                    logger.warning(
+                        "Media MCP 缺少 OPENAI_MEDIA_API_KEY，跳过图片与语音工具"
+                    )
+                    continue
+                media_server = configured_server.model_copy(deep=True)
+                media_server.env.update(
+                    {
+                        "AL1S_MEDIA_OPENAI_API_KEY": self.config.media.api_key,
+                        "AL1S_MEDIA_OPENAI_BASE_URL": self.config.media.base_url,
+                        "AL1S_MEDIA_IMAGE_MODEL": self.config.media.image_model,
+                        "AL1S_MEDIA_TTS_MODEL": self.config.media.speech_model,
+                        "AL1S_MEDIA_TTS_VOICE": self.config.media.speech_voice,
+                        "AL1S_MEDIA_OUTPUT_DIR": str(
+                            Path(self.config.media.output_dir).resolve()
+                        ),
+                        "AL1S_MEDIA_TTL_SECONDS": str(
+                            self.config.media.retention_seconds
+                        ),
+                    }
+                )
+                mcp_configs.append(media_server)
 
             if mcp_configs:
                 logger.info(f"正在初始化 {len(mcp_configs)} 个MCP服务器...")
@@ -305,6 +359,14 @@ class AL1SBot:
                 self._handle_message,
             )
         )
+        if self.user_profile_service:
+            guarded_profile_document = self._guard_profile_document(
+                self._handle_profile_document
+            )
+            self.application.add_handler(
+                MessageHandler(filters.Document.ALL, guarded_profile_document),
+                group=1,
+            )
 
     def _register_command_handlers(self):
         """批量注册命令处理器"""
@@ -349,6 +411,9 @@ class AL1SBot:
         # 知识管理功能
         if group_name == "knowledge":
             return self.active_agent_service is not None
+
+        if group_name == "profile":
+            return self.user_profile_service is not None
 
         return True  # 默认启用
 
@@ -397,6 +462,17 @@ class AL1SBot:
                     await self._reply(update, context, "请求过于频繁，请稍后再试。")
                 return
             await handler(update, context)
+
+        return guarded
+
+    def _guard_profile_document(self, handler):
+        """只让明确的私聊画像文件进入统一去重和限流流程。"""
+        guarded_handler = self._guard_command(handler)
+
+        async def guarded(update: Update, context: ContextTypes.DEFAULT_TYPE):
+            if not self._is_profile_document_request(update):
+                return
+            await guarded_handler(update, context)
 
         return guarded
 
@@ -721,6 +797,13 @@ class AL1SBot:
                                 message += f"• 最后更新: {last_created}\n"
                             message += "\n"
 
+            document_stats = await asyncio.to_thread(
+                self.database_service.get_rag_document_stats
+            )
+            message += "\n📖 <b>技术文档语料</b>\n"
+            message += f"• 文档: {document_stats['documents']}\n"
+            message += f"• 分块: {document_stats['chunks']}\n"
+
             await self._reply(update, context, message, parse_mode="HTML")
 
         except Exception as e:
@@ -739,11 +822,12 @@ class AL1SBot:
                     update,
                     context,
                     "📚 <b>知识管理</b>\n\n"
-                    "新版本中，知识通过自动学习功能从对话中提取。\n"
-                    "您可以通过与机器人对话来自动积累知识！\n\n"
+                    "知识库包含全局技术文档，以及按私聊/群聊命名空间隔离的自动学习记忆。\n"
+                    "技术文档需由主机上的摄取命令导入，聊天记忆会按配置自动积累。\n\n"
                     "可用命令:\n"
                     "• <code>/knowledge search 关键词</code> - 搜索知识\n"
-                    "• <code>/rag_stats</code> - 查看学习统计",
+                    "• <code>/rag_stats</code> - 查看文档与学习统计\n"
+                    "• <code>/rebuild_index</code> - 管理员重建索引",
                     parse_mode="HTML",
                 )
                 return
@@ -754,22 +838,45 @@ class AL1SBot:
                 query = " ".join(args[1:])
                 # 使用新的向量搜索服务
                 if hasattr(self.active_agent_service, "vector_service"):
-                    results = await self.active_agent_service.vector_service.search_knowledge(
-                        query,
-                        top_k=3,
-                        knowledge_namespace=self.group_chat_service.knowledge_namespace(
-                            self.group_chat_service.session_key(update)
-                        ),
+                    session_key = self.group_chat_service.session_key(update)
+                    namespaces = [config.rag.technical_namespace]
+                    if (
+                        session_key.scope == "private"
+                        or self.group_chat_service.memory_enabled(session_key.chat_id)
+                    ):
+                        namespaces.append(
+                            self.group_chat_service.knowledge_namespace(session_key)
+                        )
+                    results = (
+                        await self.active_agent_service.vector_service.search_knowledge(
+                            query,
+                            top_k=3,
+                            knowledge_namespaces=namespaces,
+                        )
                     )
                     if results:
-                        message = f"🔍 <b>搜索结果：{query}</b>\n\n"
+                        message = f"🔍 <b>搜索结果：{html.escape(query)}</b>\n\n"
                         for i, result in enumerate(results, 1):
-                            title = result.get("title", "无标题")
-                            content = result.get("content", result.get("summary", ""))[
-                                :100
-                            ]
-                            score = result.get("similarity_score", 0)
-                            message += f"{i}. <b>{title}</b>\n{content}...\n相似度: {score:.2f}\n\n"
+                            title = html.escape(str(result.get("title", "无标题")))
+                            content = html.escape(
+                                str(result.get("content", result.get("summary", "")))[
+                                    :180
+                                ]
+                            )
+                            score = float(
+                                result.get(
+                                    "retrieval_score",
+                                    result.get("similarity_score", 0),
+                                )
+                            )
+                            source = html.escape(str(result.get("source_uri", "")))
+                            source_line = (
+                                f"\n来源: <code>{source}</code>" if source else ""
+                            )
+                            message += (
+                                f"{i}. <b>{title}</b>\n{content}...{source_line}"
+                                f"\n检索分数: {score:.4f}\n\n"
+                            )
                         await self._reply(update, context, message, parse_mode="HTML")
                     else:
                         await self._reply(update, context, "🔍 没有找到相关知识")
@@ -824,18 +931,219 @@ class AL1SBot:
     ):
         """处理rebuild_index命令 - 重建向量索引"""
         try:
-            await self._reply(
-                update,
-                context,
-                "🔄 <b>重建索引</b>\n\n"
-                "新架构中，向量索引会自动维护。\n"
-                "如需重新初始化，请重启机器人。",
-                parse_mode="HTML",
-            )
+            if update.effective_user.id not in self.config.telegram.admin_user_ids:
+                await self._reply(
+                    update, context, "权限不足：仅 Bot 管理员可重建索引。"
+                )
+                return
+            vector_service = getattr(self.active_agent_service, "vector_service", None)
+            if vector_service is None or not hasattr(vector_service, "rebuild"):
+                await self._reply(update, context, "当前 Agent 不支持索引重建。")
+                return
+            await self._reply(update, context, "正在从 SQLite 重建完整向量索引……")
+            rebuilt = await vector_service.rebuild()
+            if rebuilt:
+                stats = await asyncio.to_thread(
+                    self.database_service.get_rag_document_stats
+                )
+                await self._reply(
+                    update,
+                    context,
+                    f"索引重建完成：{stats['documents']} 篇文档，"
+                    f"{stats['chunks']} 个技术分块。",
+                )
+            else:
+                await self._reply(update, context, "索引重建失败，请检查 Bot 日志。")
 
         except Exception as e:
             logger.error(f"重建索引失败: {e}")
             await self._reply(update, context, "❌ 重建索引失败")
+
+    @staticmethod
+    def _is_private_chat(update: Update) -> bool:
+        chat_type = getattr(getattr(update, "effective_chat", None), "type", "")
+        return str(getattr(chat_type, "value", chat_type)).lower() == "private"
+
+    def _is_profile_document_request(self, update: Update) -> bool:
+        if not self._is_private_chat(update):
+            return False
+        message = getattr(update, "effective_message", None)
+        document = getattr(message, "document", None)
+        if not document:
+            return False
+        filename = (getattr(document, "file_name", None) or "").casefold()
+        caption = (getattr(message, "caption", None) or "").strip().casefold()
+        return filename in {
+            "profile.md",
+            "profile.txt",
+            "al1s-profile.md",
+            "al1s-profile.txt",
+        } or caption in {
+            "profile",
+            "/profile",
+            "画像",
+            "个人画像",
+        }
+
+    async def _require_private_profile_chat(self, update: Update, context) -> bool:
+        if self._is_private_chat(update):
+            return True
+        await self._reply(
+            update,
+            context,
+            "个人画像只能在与机器人的一对一私聊中查看或修改。",
+        )
+        return False
+
+    async def _handle_profile_command(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ):
+        if not await self._require_private_profile_chat(update, context):
+            return
+        action = context.args[0].casefold() if context.args else "view"
+        user_id = update.effective_user.id
+        if action == "template":
+            await self._reply(
+                update,
+                context,
+                self.user_profile_service.template(),
+            )
+            return
+        if action == "export":
+            profile = await self.user_profile_service.get_profile(user_id)
+            if not profile:
+                await self._reply(update, context, "你还没有保存个人画像。")
+                return
+            payload = io.BytesIO(profile.content.encode("utf-8"))
+            payload.name = "profile.md"
+            await update.effective_message.reply_document(
+                document=payload,
+                filename="profile.md",
+                caption="你的 AL1S 私有画像导出",
+            )
+            return
+        if action == "privacy":
+            await self._reply(
+                update,
+                context,
+                "画像保存在本机 SQLite 中，仅在私聊时加入模型上下文；群聊不会注入。"
+                "画像内容会随私聊请求发送给当前配置的模型服务商。请勿写入密码、Token 或私钥。",
+            )
+            return
+        profile = await self.user_profile_service.get_profile(user_id)
+        if not profile:
+            await self._reply(
+                update,
+                context,
+                "尚未设置个人画像。使用 /profile template 获取模板，"
+                "填写后把 profile.md 发给我，或使用 /profile_set 文本。",
+            )
+            return
+        preview = profile.content[:1200]
+        suffix = (
+            "\n\n[仅显示前 1200 字符，可用 /profile export 导出全文]"
+            if len(profile.content) > 1200
+            else ""
+        )
+        await self._reply(
+            update,
+            context,
+            f"当前私有画像（更新于 {profile.updated_at or '未知'}）：\n\n{preview}{suffix}",
+        )
+
+    async def _handle_profile_set_command(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ):
+        if not await self._require_private_profile_chat(update, context):
+            return
+        content = " ".join(context.args).strip()
+        if not content:
+            await self._reply(update, context, "用法：/profile_set 画像内容")
+            return
+        try:
+            await self.user_profile_service.set_profile(
+                update.effective_user.id, content, source="telegram_command"
+            )
+        except ProfileValidationError as exc:
+            await self._reply(update, context, f"画像未保存：{exc}")
+            return
+        await self._reply(update, context, "个人画像已替换，仅会在私聊中使用。")
+
+    async def _handle_profile_add_command(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ):
+        if not await self._require_private_profile_chat(update, context):
+            return
+        content = " ".join(context.args).strip()
+        if not content:
+            await self._reply(update, context, "用法：/profile_add 要追加的内容")
+            return
+        try:
+            await self.user_profile_service.append_profile(
+                update.effective_user.id, content, source="telegram_command"
+            )
+        except ProfileValidationError as exc:
+            await self._reply(update, context, f"画像未保存：{exc}")
+            return
+        await self._reply(update, context, "内容已追加到你的私有画像。")
+
+    async def _handle_profile_clear_command(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ):
+        if not await self._require_private_profile_chat(update, context):
+            return
+        if not context.args or context.args[0].casefold() != "confirm":
+            await self._reply(
+                update,
+                context,
+                "该操作会删除完整画像。确认请发送 /profile_clear confirm",
+            )
+            return
+        deleted = await self.user_profile_service.clear_profile(
+            update.effective_user.id
+        )
+        await self._reply(
+            update, context, "个人画像已删除。" if deleted else "当前没有可删除的画像。"
+        )
+
+    async def _handle_profile_document(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        message = update.effective_message
+        document = getattr(message, "document", None)
+        if not document or not self._is_profile_document_request(update):
+            return
+        declared_size = getattr(document, "file_size", None)
+        if not isinstance(declared_size, int) or isinstance(declared_size, bool):
+            await self._reply(update, context, "无法确认画像文件大小，未下载。")
+            return
+        max_bytes = self.config.profile.max_document_bytes
+        if declared_size < 0 or declared_size > max_bytes:
+            await self._reply(update, context, "画像文件超过大小上限，未导入。")
+            return
+        try:
+            telegram_file = await context.bot.get_file(document.file_id)
+            payload = bytes(await telegram_file.download_as_bytearray())
+            if len(payload) > max_bytes:
+                await self._reply(update, context, "画像文件超过大小上限，未导入。")
+                return
+            content = payload.decode("utf-8-sig")
+            await self.user_profile_service.set_profile(
+                update.effective_user.id, content, source="telegram_document"
+            )
+        except UnicodeDecodeError:
+            await self._reply(
+                update, context, "画像文件必须是 UTF-8 编码的 Markdown 或文本。"
+            )
+            return
+        except ProfileValidationError as exc:
+            await self._reply(update, context, f"画像未导入：{exc}")
+            return
+        except Exception as exc:
+            logger.exception("导入用户画像失败: {}", exc)
+            await self._reply(update, context, "画像导入失败，请稍后重试。")
+            return
+        await self._reply(update, context, "个人画像已导入，仅会在私聊中使用。")
 
     async def _handle_group_status_command(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE

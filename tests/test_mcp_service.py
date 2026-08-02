@@ -6,7 +6,12 @@ from pydantic import ValidationError
 from src.config import MCPConfig
 from src.config import MCPServerConfig as ParsedMCPServerConfig
 from src.infra import mcp as mcp_module
-from src.infra.mcp import MCPServerConfig, MCPService
+from src.infra.mcp import (
+    MEDIA_CAPTURE_NONCE_ARGUMENT,
+    MEDIA_CAPTURE_OWNER_ARGUMENT,
+    MCPServerConfig,
+    MCPService,
+)
 
 
 class _AsyncContext:
@@ -41,7 +46,7 @@ def _install_fake_client(
         async def initialize(self):
             return None
 
-        async def list_tools(self):
+        async def list_tools(self, cursor=None):
             return SimpleNamespace(tools=list(listed_tools or []))
 
         async def call_tool(self, name, arguments):
@@ -288,3 +293,107 @@ async def test_admin_tool_is_hidden_and_cannot_be_called_by_public_user(
     )
 
     assert response == "工具调用失败: 无权调用 dangerous_action"
+
+
+@pytest.mark.asyncio
+async def test_media_tool_binding_is_injected_and_model_values_are_overridden(
+    monkeypatch,
+):
+    result = SimpleNamespace(
+        content=[SimpleNamespace(text="generated without artifact in this unit test")],
+        structuredContent=None,
+        isError=False,
+    )
+    calls = []
+    _install_fake_client(monkeypatch, call_result=result, calls=calls)
+    service = MCPService()
+    server = MCPServerConfig(name="media", command="media-server", access="public")
+    service.servers[server.name] = server
+    service.tools[server.name] = {
+        "generate_image": {
+            "description": "image",
+            "schema": {},
+            "server": server.name,
+            "remote_name": "generate_image",
+            "access": "public",
+        }
+    }
+    token = service.begin_media_capture("telegram:10:10:1:1")
+    capture = service._media_capture.get()
+
+    response = await service.call_tool(
+        "generate_image",
+        {
+            "prompt": "diagram",
+            MEDIA_CAPTURE_NONCE_ARGUMENT: "model-controlled",
+            MEDIA_CAPTURE_OWNER_ARGUMENT: "model-controlled",
+        },
+    )
+    service.finish_media_capture(token)
+
+    assert response == "generated without artifact in this unit test"
+    assert calls == [
+        (
+            "generate_image",
+            {
+                "prompt": "diagram",
+                MEDIA_CAPTURE_NONCE_ARGUMENT: capture.nonce,
+                MEDIA_CAPTURE_OWNER_ARGUMENT: capture.owner_tag,
+            },
+        )
+    ]
+
+
+@pytest.mark.asyncio
+async def test_media_tool_call_without_capture_never_starts_server(monkeypatch):
+    calls = []
+    _install_fake_client(monkeypatch, calls=calls)
+    service = MCPService()
+    server = MCPServerConfig(name="media", command="media-server", access="public")
+    service.servers[server.name] = server
+    service.tools[server.name] = {
+        "generate_image": {
+            "description": "image",
+            "schema": {},
+            "server": server.name,
+            "remote_name": "generate_image",
+            "access": "public",
+        }
+    }
+
+    response = await service.call_tool("generate_image", {"prompt": "diagram"})
+
+    assert response == "工具调用失败: 媒体工具只能响应当前 Telegram 消息"
+    assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_media_binding_fields_are_hidden_from_llm_tool_schema(monkeypatch):
+    media_tool = SimpleNamespace(
+        name="generate_image",
+        description="image",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "prompt": {"type": "string"},
+                MEDIA_CAPTURE_NONCE_ARGUMENT: {"type": "string"},
+                MEDIA_CAPTURE_OWNER_ARGUMENT: {"type": "string"},
+            },
+            "required": [
+                "prompt",
+                MEDIA_CAPTURE_NONCE_ARGUMENT,
+                MEDIA_CAPTURE_OWNER_ARGUMENT,
+            ],
+        },
+        annotations=None,
+    )
+    _install_fake_client(monkeypatch, listed_tools=[media_tool])
+    service = MCPService()
+
+    assert await service.add_server(
+        MCPServerConfig(name="media", command="media-server", access="public")
+    )
+    schema = service.tools["media"]["generate_image"]["schema"]
+
+    assert schema["properties"] == {"prompt": {"type": "string"}}
+    assert schema["required"] == ["prompt"]

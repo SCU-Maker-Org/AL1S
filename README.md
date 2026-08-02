@@ -6,7 +6,10 @@
 
 - **🎭 角色扮演**: 天童爱丽丝等多种预设角色，支持角色切换
 - **🧠 智能学习**: 自动从对话中学习并记忆用户信息
+- **📚 技术 RAG**: 文档分块、Qwen3 语义检索、SQLite FTS5 混合召回和来源引用
+- **👤 私有画像**: 由用户显式维护身份、技术栈与沟通偏好，仅在一对一私聊中注入
 - **🔧 工具集成**: 支持 MCP 协议，可调用文件系统、GitHub、搜索等工具
+- **🎙️ 媒体生成**: 可选的管理员级 Media MCP，可生成图片和 Telegram 语音
 - **🔍 图片搜索**: 基于 Ascii2D 的图片反向搜索功能
 - **💾 持久存储**: SQLite 数据库存储对话历史和知识库
 - **🌐 多模型支持**: 兼容 OpenAI、月之暗面、DeepSeek 等 API
@@ -115,8 +118,8 @@ AL1S-Bot/
 ### 知识管理
 
 - `/knowledge search <关键词>` - 搜索知识库
-- `/knowledge stats` - 知识库统计
-- `/rebuild_knowledge` - 重建知识索引
+- `/rag_stats` - 知识库与学习统计
+- `/rebuild_index` - 重建知识索引
 
 ## ⚙️ 配置详解
 
@@ -159,9 +162,70 @@ learning_threshold = 0.8
 
 首次使用 Qwen3 时，Sentence Transformers 会从 Hugging Face 下载约 1.2 GB 的模型文件，启动时间取决于网络和磁盘速度。模型会写入本机 Hugging Face 缓存，之后启动无需重复下载。
 
-项目锁定 PyTorch `>=2.13,<2.14`。旧版 2.8 在 Apple Silicon CPU 上加载 Qwen3 时可能触发原生 OpenMP 崩溃；不要单独把 PyTorch 降回旧版。可用 `uv sync --frozen` 恢复锁文件中的兼容版本。Linux 默认从 PyTorch 官方 CPU wheel 仓库安装，避免 Docker 镜像额外拉取整套 CUDA 运行时；需要 Linux CUDA 时应按目标 CUDA 版本调整 `tool.uv.sources` 后重新锁定。
+项目锁定 PyTorch `>=2.13,<2.14`。Apple Silicon 上，FAISS 与 PyTorch 的 OpenMP 运行时存在已知冲突；项目会先加载 Sentence Transformers/PyTorch，再导入 FAISS，请勿颠倒 [`src/infra/vector.py`](src/infra/vector.py) 中的顺序。可用 `uv sync --frozen` 恢复锁文件中的兼容版本。Linux 默认从 PyTorch 官方 CPU wheel 仓库安装，避免 Docker 镜像额外拉取整套 CUDA 运行时；需要 Linux CUDA 时应按目标 CUDA 版本调整 `tool.uv.sources` 后重新锁定。
 
-向量目录包含索引清单，记录模型 ID、模型提交、维度、归一化方式、query prompt 内容和索引格式版本。升级前的 MiniLM 索引没有该清单，或者清单与当前模型不一致时，程序会保留 SQLite 中的知识数据，并自动使用新模型重建 FAISS 索引；不要为此删除 `data/bot.db`。重建期间知识检索尚不可用，完成后会恢复。如果日志显示重建失败，先检查模型下载、可用磁盘空间和 `data/vector_store` 的写权限，再执行 `/rebuild_knowledge`。
+向量目录包含索引清单，记录模型 ID、模型提交、维度、归一化方式、query prompt、索引格式和 generation。每代索引写入独立快照，再以清单原子切换；CLI 与在线 Bot 同时更新时使用跨进程锁和 generation CAS，旧进程不能覆盖新索引。升级前的 MiniLM 索引没有兼容清单时，程序会保留 SQLite 中的知识数据，并自动使用新模型重建 FAISS 索引；不要为此删除 `data/bot.db`。
+
+#### 技术文档 RAG
+
+技术语料默认放在 [`knowledge/technical/`](knowledge/technical/README.md)，受控 domain 只有 `sys`、`hpc`、`compile`、`distributed`、`db`、`storage`、`ai_workload`、`cloud` 和 `security`。入库器接受 UTF-8 的 Markdown、纯文本、reStructuredText、HTML、JSON、YAML、TOML，以及常见源码、配置文件和构建文件；二进制文件、越界符号链接、未知 domain 和超过大小上限的文档会被拒绝。
+
+Markdown 可以使用 YAML frontmatter 保存可追溯元数据：
+
+```markdown
+---
+title: PostgreSQL MVCC 可见性规则
+source_id: postgresql_mvcc
+domains: [db, sys, storage]
+product: PostgreSQL
+version: "18"
+source_uri: https://www.postgresql.org/docs/18/mvcc.html
+license: PostgreSQL License
+language: zh-CN
+trust_level: 95
+---
+
+# PostgreSQL MVCC 可见性规则
+...
+```
+
+从仓库根目录执行入库；`--domains` 是未声明 frontmatter 时的默认标签，也可以填写多个逗号分隔的受控 domain：
+
+```bash
+uv run python scripts/ingest_rag.py knowledge/technical \
+  --domains sys,hpc,compile,distributed,db,storage,ai_workload,cloud,security
+```
+
+仓库还提供受白名单约束的官方来源清单 [`knowledge/sources.toml`](knowledge/sources.toml)，覆盖 PostgreSQL、Linux/KVM/UFFD/FUSE/virtio、Kubernetes/CNI、LLVM、PyTorch、NCCL、vLLM 和 Cocoon。抓取器逐跳校验 HTTPS、DNS、重定向、响应类型与大小：
+
+```bash
+uv run python scripts/fetch_rag_sources.py --all --json
+uv run python scripts/ingest_rag.py data/rag_sources --strict --json
+```
+
+目录入库是一次完整对账：稳定 `source_id` 会把 URL/版本变化更新到原文档；删除文件、改名或设为 `index: false` 会清除同一 collection、namespace 和 source root 下的旧分块。若扫描出现损坏文件、越界链接或超限文件，则本轮不会执行清理，避免误删已有知识。
+
+入库完成后，文档和分块元数据保存在 SQLite，FAISS 索引会从数据库重建。检索同时使用 Qwen3 向量相似度和 SQLite FTS5 关键词召回，中文连续文本会额外建立 bigram，再用 RRF 融合结果；模型上下文会包含 `[来源 N]`、标题、章节、版本和 URI。引用表示回答使用了哪个入库片段，不等于自动验证事实，因此生产语料仍应优先使用官方文档，并维护准确的来源、版本和许可字段。
+
+当前嵌入模型就是 `Qwen/Qwen3-Embedding-0.6B`，并固定了模型 revision。它不是需要淘汰的旧 MiniLM 模型，本轮不替换；现阶段通过高质量语料、稳定分块、混合检索和引用提升效果，比盲目增大嵌入模型更直接。完整语料规范和分类地图见 [`knowledge/technical/README.md`](knowledge/technical/README.md) 与 [`knowledge/technical/domain-map.md`](knowledge/technical/domain-map.md)。
+
+### 私有用户画像
+
+画像用于让 AL1S 理解用户主动提供的身份背景、技术栈和聊天习惯。所有画像命令只能在与机器人的一对一私聊中使用：
+
+- `/profile` 或 `/profile view`：查看画像预览。
+- `/profile template`：取得可填写的 Markdown 模板。
+- `/profile export`：导出完整 `profile.md`。
+- `/profile privacy`：查看数据边界。
+- `/profile_set <内容>`：替换画像。
+- `/profile_add <内容>`：追加画像。
+- `/profile_clear confirm`：删除画像。
+
+也可以在私聊直接发送 UTF-8 编码的 `profile.md`、`profile.txt`、`al1s-profile.md` 或 `al1s-profile.txt`。画像按 Telegram 用户 ID 隔离并保存在本机 `data/bot.db`；它只会加入该用户的私聊系统上下文，群聊不会注入，也不能改变管理员身份、MCP 权限或安全规则。
+
+画像可以完整保存和导出，但每次请求只注入 `[profile].max_prompt_chars` 允许的前部内容（默认 12000 字符）；请把称呼、沟通习惯、核心技术栈和当前目标放在文件前面，超出预算的内容会明确标记为已截断。
+
+`reject_secrets = true` 会拒绝常见 Token、云密钥和私钥格式，但这只是防误传检查，不是完备的秘密扫描器。SQLite 文件不是加密保险箱，不要在画像中保存密码、Token、Cookie、私钥或恢复码。私聊调用模型时，画像内容会发送给 `[openai]` 当前配置的模型提供商，并受该提供商的日志、保留和隐私政策约束；删除本地画像不会撤回已经发送的请求，也不会清除提供商日志或系统备份。
 
 ### MCP 工具配置
 
@@ -228,6 +292,44 @@ env = { TAVILY_API_KEY = "${TAVILY_API_KEY}" }
 ```
 
 启用的服务器缺少该环境变量时，配置校验会直接报错。服务器名称必须唯一，写错字段也会在启动时被拒绝。未填写 `access` 时按 `admin` 处理；需要先在 `[telegram].admin_user_ids` 中填写自己的 Telegram 用户 ID，管理员工具才会出现在该用户的 `/tools` 和 Agent 工具列表里。权限在工具展示和实际调用两层校验，不能通过猜测工具名绕过。
+
+#### Media MCP：图片和语音
+
+Media MCP 使用独立的 OpenAI 媒体密钥，不会复用 DeepSeek 等聊天端点。必须先提供有效的 `OPENAI_MEDIA_API_KEY`，否则机器人会跳过媒体服务器，不能实际生成图片或语音：
+
+```bash
+export OPENAI_MEDIA_API_KEY="your-openai-api-key"
+```
+
+然后启用媒体功能，并保持 MCP 服务器为管理员级权限：
+
+```toml
+[telegram]
+admin_user_ids = [123456789]
+
+[media]
+enabled = true
+api_key = "" # 留空时读取 OPENAI_MEDIA_API_KEY
+base_url = "https://api.openai.com/v1"
+image_model = "gpt-image-2"
+speech_model = "tts-1"
+speech_voice = "alloy"
+output_dir = "data/media_outbox"
+
+[[mcp.servers]]
+name = "media"
+command = "uv"
+args = ["run", "python", "-m", "src.mcp_servers.media_server"]
+enabled = true
+access = "admin"
+read_only = false
+include_tools = ["generate_image", "synthesize_speech"]
+tool_timeout = 180
+```
+
+重启机器人后，`telegram.admin_user_ids` 中的管理员可以直接说“生成一张 PostgreSQL WAL 写入路径示意图，横向布局”，或“用语音读出这段故障复盘摘要”。Agent 会按需调用 `generate_image` 或 `synthesize_speech`。每次 Telegram update 都使用随机 nonce 和调用者绑定目录；机器人只接受受信 `media` server 的结果，并通过防符号链接的文件描述符复验路径、大小、MIME、TTL 和哈希，发送后立即清理。这不是 `/image` 或 `/voice` 固定命令；是否调用工具由 Agent 根据请求决定。
+
+语音消息默认带有“AI 生成语音”说明。图片提示词和待朗读文本会发送给 `[media].base_url` 对应的媒体服务商，并可能记录在本地工具调用日志中；不要用它处理秘密或不应外发的内容。
 
 #### 高权限服务器
 
@@ -333,7 +435,7 @@ Forum Topic 的所有文本、图片、占位、错误和拆分回复都会携�
 - 私聊知识使用 `private:{user_id}` 命名空间，保持现有自动学习行为。
 - 群聊默认关闭长期学习；旁听缓冲只存在内存中。
 - 开启群学习后使用 `group:{chat_id}` 或 `topic:{chat_id}:{message_thread_id}`，不会写入成员个人知识命名空间。
-- 群聊 RAG 检索按同一命名空间过滤；LangChain 模式下群聊使用隔离的简化 RAG 路径，避免全局检索工具跨群读取。
+- 群聊 RAG 检索按同一命名空间过滤；LangChain 模式使用同样的显式命名空间，并在不放宽隔离的前提下保留 MCP 工具循环。
 - 请告知群成员机器人可能接收哪些消息，并按需要保持 BotFather 隐私模式开启。
 
 完整设计见 [`docs/group-chat-design.md`](docs/group-chat-design.md)。
@@ -365,6 +467,7 @@ Forum Topic 的所有文本、图片、占位、错误和拆分回复都会携�
 - 文本对话
 - 图片分析和搜索
 - 文件处理
+- 使用独立 OpenAI 媒体密钥的管理员级图片生成和语音合成
 
 ## 🚨 故障排除
 
@@ -390,10 +493,11 @@ Forum Topic 的所有文本、图片、占位、错误和拆分回复都会携�
 
 4. **向量存储问题**
    - 先运行 `python -c "import torch; print(torch.__version__)"`，确认 PyTorch 为 2.13.x。
+   - Apple Silicon 若在模型加载阶段出现原生段错误，确认代码没有先导入 `faiss` 再导入 PyTorch；这是上游已确认的 OpenMP 运行时冲突。
    - 切换嵌入模型后无需手动删除旧索引；启动时会根据索引清单自动从 SQLite 重建。
    - 查看日志中的“向量索引与当前模型不兼容”和“从数据库重建”记录，确认重建已完成。
    - 不要删除 `data/bot.db`；索引目录只是可重建的派生数据。
-   - 模型下载或索引写入失败时，检查网络、磁盘空间和目录权限，然后重启或执行 `/rebuild_knowledge`。
+   - 模型下载或索引写入失败时，检查网络、磁盘空间和目录权限，然后重启或执行 `/rebuild_index`。
 
 5. **MCP 服务器连接失败**
    - 使用 `command -v npx` 和 `command -v uvx` 确认启动命令存在；macOS 上还要留意 IDE 自带 Node.js 是否遮蔽 Homebrew Node.js。

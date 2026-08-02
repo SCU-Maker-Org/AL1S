@@ -236,3 +236,89 @@ SELECT
 FROM knowledge_retrievals;
 
 INSERT OR IGNORE INTO schema_migrations(version) VALUES (2);
+
+-- 文档级 RAG：权威技术语料与聊天自动学习分开存储
+CREATE TABLE IF NOT EXISTS rag_documents (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    collection TEXT NOT NULL,
+    knowledge_namespace TEXT NOT NULL,
+    document_key TEXT NOT NULL,
+    source_root TEXT NOT NULL DEFAULT '',
+    source_uri TEXT NOT NULL,
+    title TEXT NOT NULL,
+    domain TEXT NOT NULL DEFAULT 'sys',
+    subdomain TEXT NOT NULL DEFAULT '',
+    product TEXT NOT NULL DEFAULT '',
+    version TEXT NOT NULL DEFAULT '',
+    language TEXT NOT NULL DEFAULT '',
+    license TEXT NOT NULL DEFAULT '',
+    trust_level INTEGER NOT NULL DEFAULT 50,
+    content_hash TEXT NOT NULL,
+    metadata_json TEXT NOT NULL DEFAULT '{}',
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(collection, knowledge_namespace, source_uri)
+);
+
+CREATE TABLE IF NOT EXISTS rag_chunks (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    document_id INTEGER NOT NULL,
+    chunk_index INTEGER NOT NULL,
+    heading_path TEXT NOT NULL DEFAULT '',
+    content TEXT NOT NULL,
+    content_hash TEXT NOT NULL,
+    token_count INTEGER NOT NULL DEFAULT 0,
+    metadata_json TEXT NOT NULL DEFAULT '{}',
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (document_id) REFERENCES rag_documents (id) ON DELETE CASCADE,
+    UNIQUE(document_id, chunk_index)
+);
+
+CREATE VIRTUAL TABLE IF NOT EXISTS rag_chunks_fts USING fts5(
+    chunk_id UNINDEXED,
+    collection UNINDEXED,
+    knowledge_namespace UNINDEXED,
+    title,
+    heading_path,
+    content,
+    domain,
+    product,
+    tokenize = 'unicode61 remove_diacritics 2'
+);
+
+CREATE TABLE IF NOT EXISTS rag_ingestion_runs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    source_root TEXT NOT NULL,
+    collection TEXT NOT NULL,
+    knowledge_namespace TEXT NOT NULL,
+    documents_seen INTEGER NOT NULL DEFAULT 0,
+    documents_changed INTEGER NOT NULL DEFAULT 0,
+    chunks_written INTEGER NOT NULL DEFAULT 0,
+    status TEXT NOT NULL,
+    error_message TEXT,
+    started_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    finished_at DATETIME
+);
+
+CREATE TABLE IF NOT EXISTS user_profiles (
+    telegram_user_id INTEGER PRIMARY KEY,
+    content TEXT NOT NULL,
+    content_hash TEXT NOT NULL,
+    source TEXT NOT NULL DEFAULT 'manual',
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_rag_documents_scope
+    ON rag_documents(collection, knowledge_namespace, domain, product);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_rag_documents_identity
+    ON rag_documents(collection, knowledge_namespace, document_key);
+CREATE INDEX IF NOT EXISTS idx_rag_documents_source_root
+    ON rag_documents(collection, knowledge_namespace, source_root);
+CREATE INDEX IF NOT EXISTS idx_rag_chunks_document ON rag_chunks(document_id);
+CREATE INDEX IF NOT EXISTS idx_rag_chunks_hash ON rag_chunks(content_hash);
+INSERT OR IGNORE INTO schema_migrations(version) VALUES (3);
+INSERT OR IGNORE INTO schema_migrations(version) VALUES (4);
+INSERT OR IGNORE INTO schema_migrations(version) VALUES (5);
+INSERT OR IGNORE INTO schema_migrations(version) VALUES (6);

@@ -5,6 +5,7 @@
 import time
 from dataclasses import dataclass
 from datetime import datetime
+from hashlib import sha256
 from typing import Any, Dict, List, Literal, Optional
 
 from pydantic import BaseModel, Field
@@ -177,3 +178,34 @@ class KnowledgeEntry:
             "knowledge_namespace": self.knowledge_namespace,
             "created_at": self.created_at.isoformat() if self.created_at else None,
         }
+
+
+class UserProfile(BaseModel):
+    """用户显式提供、仅用于个性化对话的私有画像。"""
+
+    telegram_user_id: int = Field(gt=0)
+    content: str
+    content_hash: str = ""
+    source: str = "manual"
+    created_at: Optional[str] = None
+    updated_at: Optional[str] = None
+
+    def model_post_init(self, __context: Any) -> None:
+        if not self.content_hash:
+            self.content_hash = sha256(self.content.encode("utf-8")).hexdigest()
+
+
+@dataclass(frozen=True, slots=True)
+class MediaArtifact:
+    """由 MCP 生成、等待 Telegram 发送的受控媒体产物。"""
+
+    artifact_id: str
+    kind: Literal["photo", "voice"]
+    relative_path: str
+    mime_type: str
+    byte_size: int
+    sha256: str
+    expires_at: float
+    capture_nonce: str
+    owner_tag: str
+    caption: str = ""

@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import json
+from copy import deepcopy
 
 import numpy as np
 import pytest
 
 from src.infra import vector as vector_module
 from src.infra.vector import EmbeddingModel, VectorService, VectorStore
+from src.models import KnowledgeEntry
 
 
 class FakeSentenceTransformer:
@@ -170,6 +172,64 @@ class FakeDatabase:
         ]
 
 
+class MutableDatabase:
+    def __init__(self, entries):
+        self.entries = entries
+
+    def get_all_knowledge_entries(self):
+        return deepcopy(self.entries)
+
+
+class SmallEmbeddingModel:
+    model_type = "test-embedding"
+    model_name = "test-embedding"
+    model_revision = "v1"
+    dimension = 2
+    normalized = True
+    query_prompt_name = None
+    query_prompt = None
+
+    def __init__(self, encode_single_hook=None):
+        self.encode_single_hook = encode_single_hook
+
+    async def fit(self, _texts):
+        return None
+
+    async def encode(self, texts):
+        return np.asarray(
+            [[1.0, float(index % 2)] for index, _ in enumerate(texts)],
+            dtype=np.float32,
+        )
+
+    async def encode_single(self, _text, *, is_query=False):
+        assert is_query is False
+        if self.encode_single_hook:
+            hook = self.encode_single_hook
+            self.encode_single_hook = None
+            await hook()
+        return np.asarray([1.0, 0.0], dtype=np.float32)
+
+
+def make_memory_service(database, path, embedding=None):
+    service = VectorService(database, vector_store_path=str(path))
+    service.embedding_model = embedding or SmallEmbeddingModel()
+    service.vector_store = VectorStore(backend="memory", dimension=2)
+    return service
+
+
+def entry(entry_id, title):
+    return {
+        "id": entry_id,
+        "title": title,
+        "content": f"{title} content",
+        "summary": "summary",
+        "keywords": "test",
+        "category": "test",
+        "importance_score": 0.5,
+        "knowledge_namespace": "global",
+    }
+
+
 @pytest.mark.asyncio
 async def test_model_manifest_mismatch_rebuilds_without_loading_old_index(
     tmp_path,
@@ -201,6 +261,76 @@ async def test_model_manifest_mismatch_rebuilds_without_loading_old_index(
     manifest_text = service._manifest_path.read_text(encoding="utf-8")
     updated_manifest = json.loads(manifest_text)
     assert updated_manifest == service._index_manifest()
+
+
+@pytest.mark.asyncio
+async def test_stale_service_rebuilds_instead_of_overwriting_new_generation(tmp_path):
+    database = MutableDatabase([entry(1, "initial")])
+    stale_bot = make_memory_service(database, tmp_path)
+    assert await stale_bot._rebuild_from_database() is True
+    stale_bot._initialized = True
+    original_generation = stale_bot._loaded_generation
+
+    cli = make_memory_service(database, tmp_path)
+    assert await cli._load_existing_data() is True
+    database.entries.append(entry(2, "cli document"))
+    assert await cli.rebuild() is True
+    cli_generation = cli._loaded_generation
+    assert cli_generation != original_generation
+
+    database.entries.append(entry(3, "new bot memory"))
+    new_entry = KnowledgeEntry(
+        id=3,
+        title="new bot memory",
+        content="new bot memory content",
+        summary="summary",
+        knowledge_namespace="global",
+    )
+    assert await stale_bot.add_knowledge(new_entry) is True
+
+    verifier = make_memory_service(database, tmp_path)
+    assert await verifier._load_existing_data() is True
+    assert {item["id"] for item in verifier.vector_store.metadata.values()} == {
+        1,
+        2,
+        3,
+    }
+    assert verifier._loaded_generation not in {
+        original_generation,
+        cli_generation,
+    }
+
+
+@pytest.mark.asyncio
+async def test_generation_change_during_incremental_encode_retries_from_database(
+    tmp_path,
+):
+    database = MutableDatabase([entry(1, "initial")])
+    writer = make_memory_service(database, tmp_path)
+    assert await writer._rebuild_from_database() is True
+    writer._initialized = True
+
+    external_rebuilder = make_memory_service(database, tmp_path)
+    assert await external_rebuilder._load_existing_data() is True
+    database.entries.append(entry(2, "concurrent memory"))
+
+    generation_before_race = writer._loaded_generation
+    writer.embedding_model.encode_single_hook = external_rebuilder.rebuild
+    new_entry = KnowledgeEntry(
+        id=2,
+        title="concurrent memory",
+        content="concurrent memory content",
+        summary="summary",
+        knowledge_namespace="global",
+    )
+
+    assert await writer.add_knowledge(new_entry) is True
+    assert external_rebuilder._loaded_generation != generation_before_race
+    assert writer._loaded_generation != external_rebuilder._loaded_generation
+
+    verifier = make_memory_service(database, tmp_path)
+    assert await verifier._load_existing_data() is True
+    assert {item["id"] for item in verifier.vector_store.metadata.values()} == {1, 2}
 
 
 @pytest.mark.asyncio

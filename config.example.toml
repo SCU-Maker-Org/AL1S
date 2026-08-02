@@ -96,6 +96,43 @@ max_tool_rounds = 4
 max_tool_calls = 12
 
 # ====================
+# 文档级 RAG
+# ====================
+[rag]
+enabled = true
+technical_collection = "technical_docs"
+technical_namespace = "global:technical"
+hybrid_search = true
+top_k_retrieval = 6
+candidate_k = 40
+rrf_k = 60
+max_context_chars = 12000
+chunk_size = 1800
+chunk_overlap = 240
+max_document_bytes = 5000000
+
+# 用户画像只在私聊注入；不要保存密码、Token 或私钥
+[profile]
+enabled = true
+max_prompt_chars = 12000
+max_document_bytes = 256000
+private_chat_only = true
+reject_secrets = true
+
+# 图片/TTS 使用独立媒体密钥，避免把不支持媒体的聊天模型端点误用为媒体端点。
+# 推荐通过环境变量 OPENAI_MEDIA_API_KEY 提供密钥。
+[media]
+enabled = false
+api_key = ""
+base_url = "https://api.openai.com/v1"
+image_model = "gpt-image-2"
+speech_model = "tts-1"
+speech_voice = "alloy"
+output_dir = "data/media_outbox"
+max_artifact_bytes = 20000000
+retention_seconds = 3600
+
+# ====================
 # LangChain 特定配置
 # ====================
 [langchain]
@@ -145,6 +182,19 @@ tool_prefix = "ctx7_"
 connect_timeout = 120
 tool_timeout = 45
 
+# 本地媒体生成 MCP。真正启用由 [media].enabled 和媒体 API Key 共同控制。
+[[mcp.servers]]
+name = "media"
+command = "uv"
+args = ["run", "python", "-m", "src.mcp_servers.media_server"]
+enabled = true
+access = "admin"
+read_only = false
+include_tools = ["generate_image", "synthesize_speech"]
+connect_timeout = 60
+tool_timeout = 180
+max_result_chars = 4000
+
 # 文件系统工具：请只开放必要目录
 [[mcp.servers]]
 name = "filesystem"
@@ -161,7 +211,7 @@ name = "web-search"
 command = "npx"
 args = ["-y", "tavily-mcp@0.2.21"]
 enabled = false
-env = { TAVILY_API_KEY = "tvly-your-api-key" }
+env = { TAVILY_API_KEY = "tvly-your-api-key", PATH = "/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin" }
 access = "admin"
 tool_timeout = 45
 

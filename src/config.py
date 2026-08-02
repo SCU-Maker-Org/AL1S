@@ -173,6 +173,59 @@ class RAGConfig(BaseModel):
     learning_trigger_messages: int = Field(3, description="学习触发的最小消息数")
     importance_threshold: float = Field(0.1, description="知识重要性阈值")
     use_llm_extraction: bool = Field(True, description="是否使用LLM进行高级知识提取")
+    technical_collection: str = Field(
+        "technical_docs", min_length=1, description="权威技术文档集合名称"
+    )
+    technical_namespace: str = Field(
+        "global:technical", min_length=1, description="权威技术文档命名空间"
+    )
+    hybrid_search: bool = Field(True, description="是否融合向量检索与 FTS5 检索")
+    candidate_k: int = Field(40, ge=5, le=500, description="每路召回候选数量")
+    rrf_k: int = Field(60, ge=1, le=1000, description="RRF 融合常数")
+    max_context_chars: int = Field(
+        12000, ge=1000, le=100000, description="注入模型的 RAG 最大字符数"
+    )
+    chunk_size: int = Field(1800, ge=256, le=12000)
+    chunk_overlap: int = Field(240, ge=0, le=4000)
+    max_document_bytes: int = Field(5_000_000, ge=1024, le=100_000_000)
+
+    @model_validator(mode="after")
+    def validate_chunking(self):
+        if self.chunk_overlap >= self.chunk_size:
+            raise ValueError("rag.chunk_overlap 必须小于 rag.chunk_size")
+        return self
+
+
+class ProfileConfig(BaseModel):
+    """用户主动维护的私有画像配置。"""
+
+    enabled: bool = True
+    max_prompt_chars: int = Field(12000, ge=500, le=30000)
+    max_document_bytes: int = Field(256_000, ge=1024, le=2_000_000)
+    private_chat_only: Literal[True] = True
+    reject_secrets: bool = True
+
+
+class MediaConfig(BaseModel):
+    """本地 Media MCP 及 Telegram 媒体派发配置。"""
+
+    enabled: bool = False
+    api_key: str = Field(
+        default_factory=lambda: os.getenv("OPENAI_MEDIA_API_KEY", ""), repr=False
+    )
+    base_url: str = "https://api.openai.com/v1"
+    image_model: str = "gpt-image-2"
+    speech_model: str = "tts-1"
+    speech_voice: str = "alloy"
+    output_dir: str = "data/media_outbox"
+    max_artifact_bytes: int = Field(20_000_000, ge=1024, le=50_000_000)
+    retention_seconds: int = Field(3600, ge=60, le=604800)
+
+    @model_validator(mode="after")
+    def resolve_media_api_key(self):
+        if not self.api_key:
+            self.api_key = os.getenv("OPENAI_MEDIA_API_KEY", "")
+        return self
 
 
 class AgentConfig(BaseModel):
@@ -247,6 +300,8 @@ class AppConfig:
         ascii2d_config = config_data.get("ascii2d", {}) if config_data else {}
         mcp_config = config_data.get("mcp", {}) if config_data else {}
         rag_config = config_data.get("rag", {}) if config_data else {}
+        profile_config = config_data.get("profile", {}) if config_data else {}
+        media_config = config_data.get("media", {}) if config_data else {}
         agent_config = config_data.get("agent", {}) if config_data else {}
         lc_config = config_data.get("langchain", {}) if config_data else {}
 
@@ -276,6 +331,8 @@ class AppConfig:
         self.ascii2d = Ascii2DConfig(**ascii2d_config)
         self.mcp = MCPConfig(**mcp_config)
         self.rag = RAGConfig(**rag_config)
+        self.profile = ProfileConfig(**profile_config)
+        self.media = MediaConfig(**media_config)
         self.agent = AgentConfig(**agent_config)
         self.langchain = LangChainConfig(**lc_config)
 
