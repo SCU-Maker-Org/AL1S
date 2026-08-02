@@ -18,6 +18,16 @@ def mention_entity(text: str, mention: str):
     return SimpleNamespace(type="mention", offset=offset, length=len(mention))
 
 
+def text_mention_entity(text: str, label: str, user_id: int):
+    offset = text.index(label)
+    return SimpleNamespace(
+        type="text_mention",
+        offset=offset,
+        length=len(label),
+        user=SimpleNamespace(id=user_id),
+    )
+
+
 def decide(service, update, **kwargs):
     return service.decide(update, BOT_USERNAME, BOT_ID, **kwargs)
 
@@ -45,6 +55,50 @@ def test_current_bot_mention_is_case_insensitive(update_factory, mention):
     assert result.allowed
     assert result.trigger_type == TriggerType.MENTION
     assert mention.casefold() not in result.cleaned_text.casefold()
+
+
+def test_current_bot_plain_username_fallback_without_entity(update_factory):
+    text = "hi @AL1SBot, please help"
+    result = decide(GroupChatService(TelegramGroupConfig()), update_factory(text))
+    assert result.allowed
+    assert result.trigger_type == TriggerType.MENTION
+    assert result.cleaned_text == "hi , please help"
+
+
+def test_current_bot_text_mention_matches_by_user_id(update_factory):
+    text = "Alice please help"
+    entity = text_mention_entity(text, "Alice", BOT_ID)
+    result = decide(
+        GroupChatService(TelegramGroupConfig(wake_words=[])),
+        update_factory(text, entities=[entity]),
+    )
+    assert result.allowed
+    assert result.trigger_type == TriggerType.MENTION
+    assert result.cleaned_text == "please help"
+
+
+def test_other_user_text_mention_does_not_trigger(update_factory):
+    text = "Alice please help"
+    entity = text_mention_entity(text, "Alice", BOT_ID + 1)
+    result = decide(
+        GroupChatService(TelegramGroupConfig(wake_words=[])),
+        update_factory(text, entities=[entity]),
+    )
+    assert not result.allowed
+
+
+def test_current_bot_mention_in_caption(update_factory):
+    caption = "@AL1SBot inspect this file"
+    entity = mention_entity(caption, "@AL1SBot")
+    update = update_factory(
+        None,
+        caption=caption,
+        caption_entities=[entity],
+    )
+    result = decide(GroupChatService(TelegramGroupConfig()), update)
+    assert result.allowed
+    assert result.trigger_type == TriggerType.MENTION
+    assert result.cleaned_text == "inspect this file"
 
 
 def test_reply_to_current_bot_triggers(update_factory):

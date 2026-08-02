@@ -15,6 +15,9 @@ class FakeMessage(SimpleNamespace):
     def parse_entity(self, entity):
         return self.text[entity.offset : entity.offset + entity.length]
 
+    def parse_caption_entity(self, entity):
+        return self.caption[entity.offset : entity.offset + entity.length]
+
 
 def make_update(
     text: str = "hello",
@@ -27,6 +30,8 @@ def make_update(
     message_id: int = 1,
     update_id: int | None = None,
     entities=None,
+    caption: str | None = None,
+    caption_entities=None,
     reply_user_id: int | None = None,
     timestamp: float | None = None,
 ):
@@ -44,9 +49,9 @@ def make_update(
         )
     message = FakeMessage(
         text=text,
-        caption=None,
+        caption=caption,
         entities=list(entities or []),
-        caption_entities=[],
+        caption_entities=list(caption_entities or []),
         reply_to_message=replied,
         message_thread_id=thread_id,
         message_id=message_id,

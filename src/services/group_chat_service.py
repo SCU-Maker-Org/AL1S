@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 import time
 from collections import defaultdict, deque
 from dataclasses import dataclass
@@ -151,11 +152,17 @@ class GroupChatService:
 
     @staticmethod
     def _entity_text(message, entity, text: str) -> str:
-        parser = getattr(message, "parse_entity", None)
+        parser_name = (
+            "parse_caption_entity"
+            if getattr(message, "text", None) is None
+            and getattr(message, "caption", None) is not None
+            else "parse_entity"
+        )
+        parser = getattr(message, parser_name, None)
         if callable(parser):
             try:
                 return str(parser(entity))
-            except (TypeError, ValueError):
+            except (RuntimeError, TypeError, ValueError):
                 pass
         offset = int(getattr(entity, "offset", 0))
         length = int(getattr(entity, "length", 0))
@@ -164,7 +171,9 @@ class GroupChatService:
             "utf-16-le", errors="ignore"
         )
 
-    def _mentions_current_bot(self, message, text: str, bot_username: str) -> bool:
+    def _mentions_current_bot(
+        self, message, text: str, bot_username: str, bot_id: int
+    ) -> bool:
         username = bot_username.lstrip("@").casefold()
         entities = list(getattr(message, "entities", None) or [])
         if not entities and getattr(message, "caption", None):
@@ -173,12 +182,23 @@ class GroupChatService:
             entity_type = getattr(
                 getattr(entity, "type", None), "value", getattr(entity, "type", "")
             )
-            if str(entity_type).lower() != "mention":
-                continue
-            mentioned = self._entity_text(message, entity, text).lstrip("@").casefold()
-            if mentioned == username:
-                return True
-        return False
+            normalized_type = str(entity_type).lower()
+            if normalized_type == "mention":
+                mentioned = (
+                    self._entity_text(message, entity, text).lstrip("@").casefold()
+                )
+                if mentioned == username:
+                    return True
+            elif normalized_type == "text_mention":
+                mentioned_user = getattr(entity, "user", None)
+                if int(getattr(mentioned_user, "id", 0)) == int(bot_id):
+                    return True
+
+        # 某些客户端或转发路径没有保留 entity，仍识别明确的 @username。
+        if not username:
+            return False
+        pattern = rf"(?<![A-Za-z0-9_])@{re.escape(username)}(?![A-Za-z0-9_])"
+        return re.search(pattern, text, flags=re.IGNORECASE) is not None
 
     @staticmethod
     def _is_reply_to_bot(message, bot_id: int) -> bool:
@@ -186,13 +206,28 @@ class GroupChatService:
         author = getattr(replied, "from_user", None)
         return bool(author and int(getattr(author, "id", 0)) == int(bot_id))
 
-    @staticmethod
-    def _clean_mention(text: str, bot_username: str) -> str:
-        target = f"@{bot_username.lstrip('@')}"
-        words = text.split()
-        return " ".join(
-            word for word in words if word.casefold() != target.casefold()
-        ).strip()
+    def _clean_mention(
+        self, text: str, bot_username: str, message=None, bot_id: int = 0
+    ) -> str:
+        username = bot_username.lstrip("@")
+        if username:
+            pattern = rf"(?<![A-Za-z0-9_])@{re.escape(username)}(?![A-Za-z0-9_])"
+            text = re.sub(pattern, "", text, flags=re.IGNORECASE)
+
+        entities = list(getattr(message, "entities", None) or [])
+        if not entities and getattr(message, "caption", None):
+            entities = list(getattr(message, "caption_entities", None) or [])
+        for entity in entities:
+            entity_type = getattr(
+                getattr(entity, "type", None), "value", getattr(entity, "type", "")
+            )
+            mentioned_user = getattr(entity, "user", None)
+            if str(entity_type).lower() == "text_mention" and int(
+                getattr(mentioned_user, "id", 0)
+            ) == int(bot_id):
+                label = self._entity_text(message, entity, text)
+                text = text.replace(label, "", 1)
+        return " ".join(text.split()).strip()
 
     def decide(
         self,
@@ -257,11 +292,13 @@ class GroupChatService:
             )
 
         message = update.effective_message
-        if self._mentions_current_bot(message, text, bot_username):
+        if self._mentions_current_bot(message, text, bot_username, bot_id):
             return TriggerDecision(
                 True,
                 TriggerType.MENTION,
-                cleaned_text=self._clean_mention(text, bot_username),
+                cleaned_text=self._clean_mention(
+                    text, bot_username, message=message, bot_id=bot_id
+                ),
                 is_group=True,
             )
         if self.config.allow_reply_trigger and self._is_reply_to_bot(message, bot_id):

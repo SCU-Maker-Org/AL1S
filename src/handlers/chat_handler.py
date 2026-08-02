@@ -436,7 +436,19 @@ class ChatHandler(BaseHandler):
         started_at = time.monotonic()
         decision: Optional[TriggerDecision] = None
         try:
-            if not update.effective_message or not update.effective_user:
+            if not update.effective_message:
+                return False
+            if not update.effective_user:
+                logger.bind(
+                    update_id=getattr(update, "update_id", None),
+                    chat_id=getattr(update.effective_chat, "id", None),
+                    sender_chat_id=getattr(
+                        getattr(update.effective_message, "sender_chat", None),
+                        "id",
+                        None,
+                    ),
+                    message_id=getattr(update.effective_message, "message_id", None),
+                ).info("telegram_message_ignored reason=missing_effective_user")
                 return False
             if (
                 self.group_chat_service

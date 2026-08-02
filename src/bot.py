@@ -288,6 +288,11 @@ class AL1SBot:
             ChatMemberHandler(self._handle_chat_member, ChatMemberHandler.CHAT_MEMBER)
         )
 
+        # 在业务过滤前记录消息元数据，避免无法区分 Telegram 未投递与策略拒绝。
+        self.application.add_handler(
+            MessageHandler(filters.ALL, self._log_message_ingress), group=-1
+        )
+
         # 图片处理器
         self.application.add_handler(
             MessageHandler(filters.PHOTO | filters.Document.IMAGE, self._handle_image)
@@ -295,7 +300,10 @@ class AL1SBot:
 
         # 通用消息处理器
         self.application.add_handler(
-            MessageHandler(filters.TEXT & ~filters.COMMAND, self._handle_message)
+            MessageHandler(
+                (filters.TEXT | filters.CAPTION) & ~filters.COMMAND,
+                self._handle_message,
+            )
         )
 
     def _register_command_handlers(self):
@@ -976,6 +984,35 @@ class AL1SBot:
         ).debug("chat_member_changed")
 
     # 消息处理方法
+    async def _log_message_ingress(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """记录不含正文的 Telegram 消息入口元数据。"""
+        message = update.effective_message
+        if not message:
+            return
+        entities = list(getattr(message, "entities", None) or []) + list(
+            getattr(message, "caption_entities", None) or []
+        )
+        entity_types = [
+            str(getattr(getattr(entity, "type", None), "value", entity.type))
+            for entity in entities
+        ]
+        sender_chat = getattr(message, "sender_chat", None)
+        logger.bind(
+            update_id=update.update_id,
+            chat_id=getattr(update.effective_chat, "id", None),
+            chat_type=str(getattr(update.effective_chat, "type", "")),
+            user_id=getattr(update.effective_user, "id", None),
+            sender_chat_id=getattr(sender_chat, "id", None),
+            message_id=getattr(message, "message_id", None),
+        ).info(
+            "telegram_message_ingress text={} caption={} entities={}",
+            bool(getattr(message, "text", None)),
+            bool(getattr(message, "caption", None)),
+            entity_types,
+        )
+
     async def _handle_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """处理文本消息"""
         await self.chat_handler.handle(update, context)
