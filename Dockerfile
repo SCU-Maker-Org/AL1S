@@ -2,7 +2,7 @@ FROM node:24.19.0-bookworm-slim@sha256:3638d9a6fe4030bd716be989438248074489337ba
 
 FROM ghcr.io/github/github-mcp-server:v1.8.0@sha256:d5a18c04b92714c309eb46a2305087e91a4dbd80420f6e462656699f95093520 AS github-mcp-runtime
 
-FROM python:3.13.13-slim-bookworm@sha256:355bfa66770995d7e9a0da4b3473b44d0cb451f6b56f5615ad9c39e3c4eca03
+FROM python:3.13.13-slim-bookworm@sha256:355bfa66770995d7e9a0da4b3473b44d0cb451f6b56f5615ad9c39e3c4eca03f
 
 ARG AL1S_VERSION=0.1.0
 ARG APP_UID=10001
