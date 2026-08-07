@@ -39,6 +39,7 @@ RUN apt-get update \
         libgomp1 \
         libstdc++6 \
         openssh-client \
+        passwd \
         tini \
         tzdata \
     && rm -rf /var/lib/apt/lists/* \
