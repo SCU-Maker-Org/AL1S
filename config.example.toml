@@ -6,7 +6,7 @@
 # ====================
 [app]
 name = "AL1S-Bot"
-version = "1.0.0"
+version = "0.1.0"
 debug = false
 
 # ====================
@@ -244,9 +244,10 @@ tool_timeout = 45
 
 # GitHub 官方 MCP Server（需要先安装服务器和访问令牌）。
 # 创建仓库/PR 时移除 --read-only；写权限场景必须保持 private_admin。
+# 可用 AL1S_MCP_GITHUB_COMMAND 覆盖宿主机与容器中的命令路径。
 [[mcp.servers]]
 name = "github"
-command = "/absolute/path/to/github-mcp-server"
+command = "github-mcp-server"
 args = ["stdio", "--read-only"]
 enabled = false
 env = { GITHUB_PERSONAL_ACCESS_TOKEN = "github_pat_your-token" }

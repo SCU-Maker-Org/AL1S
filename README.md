@@ -21,8 +21,8 @@
 
 ```bash
 # 克隆项目
-git clone <repository-url>
-cd AL1S-Bot
+git clone https://github.com/SCU-Maker-Org/AL1S.git
+cd AL1S
 
 # 安装依赖（推荐使用 uv）
 uv sync --frozen
@@ -67,6 +67,62 @@ uv run python main.py
 # 或直接运行
 python main.py
 ```
+
+## Docker / GHCR 部署
+
+发布后的正式镜像地址为 `ghcr.io/scu-maker-org/al1s`，同时提供 `linux/amd64` 和
+`linux/arm64`。镜像内包含 Python 3.13、Node.js、uv、Git、GitHub MCP
+Server、RAG 脚本和知识清单，但不包含任何 API Key、Telegram Token 或运行时数据库。
+
+```bash
+cp config.example.toml config.toml
+# 编辑 config.toml，至少填写 OpenAI 兼容接口和 Telegram Token
+
+docker compose pull
+docker compose up -d --no-build
+docker compose ps
+docker compose logs -f al1s-bot
+```
+
+默认拉取 `0.1.0`。可通过环境变量选择其他已发布版本：
+
+```bash
+AL1S_IMAGE_TAG=0.1.0 docker compose up -d --no-build
+```
+
+`al1s-data` 保存 SQLite、向量索引、媒体和 Dev Workspace，`al1s-logs`
+保存文件日志，其他 named volume 保存 Hugging Face、uv 和 npm 缓存。删除容器不会删除这些卷；不要使用 `docker compose down -v`，除非确定要清空全部持久数据。
+
+已有本地 `data/` 时，先停 Bot，再将内容迁移到 named volume：
+
+```bash
+docker compose create al1s-bot
+docker compose cp ./data/. al1s-bot:/app/data/
+docker compose run --rm --user root al1s-bot chown -R 10001:10001 /app/data
+```
+
+容器内重新导入随镜像发布的技术文档：
+
+```bash
+docker compose run --rm al1s-bot \
+  python scripts/ingest_rag.py knowledge/technical
+```
+
+需要 GitHub MCP 时，容器会通过 `AL1S_MCP_GITHUB_COMMAND` 将宿主机配置的命令路径
+覆盖为镜像内的 `github-mcp-server`。Token 仍通过 `GITHUB_PERSONAL_ACCESS_TOKEN`
+或 `[dev_workspace].github_token` 提供，不要写入镜像。
+
+本地构建和镜像冒烟测试：
+
+```bash
+docker compose build
+docker run --rm ghcr.io/scu-maker-org/al1s:0.1.0 \
+  python scripts/container_healthcheck.py --smoke
+```
+
+仓库的 `CI` 工作流会运行 Python 测试并构建 `amd64` 镜像。发布 GitHub Release
+`v0.1.0` 后，`Publish container` 工作流会分别测试 `amd64` 和 `arm64`，随后发布
+`0.1.0`、`0.1` 和 `latest`；prerelease 不更新 `latest`。也可以在 Actions 中手动运行该工作流并保持 `publish=false`，只做双架构验证。首次发布后，需要在 GitHub Packages 设置中确认镜像可见性。
 
 ## 📁 项目架构
 

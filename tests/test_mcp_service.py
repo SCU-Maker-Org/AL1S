@@ -83,6 +83,21 @@ def test_mcp_config_rejects_duplicate_server_names():
         )
 
 
+def test_mcp_config_applies_command_environment_override(monkeypatch):
+    monkeypatch.setenv("AL1S_MCP_GITHUB_COMMAND", "github-mcp-server")
+
+    config = MCPConfig(
+        servers=[
+            ParsedMCPServerConfig(
+                name="github",
+                command="/host/path/to/github-mcp-server",
+            )
+        ]
+    )
+
+    assert config.servers[0].command == "github-mcp-server"
+
+
 def test_mcp_server_config_resolves_enabled_environment_reference(monkeypatch):
     monkeypatch.setenv("AL1S_TEST_MCP_TOKEN", "resolved-token")
 

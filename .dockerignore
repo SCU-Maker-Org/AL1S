@@ -36,8 +36,17 @@ logs/
 # 配置文件（将通过挂载传入）
 .env
 .env.*
+config.toml
 config/.env
 src/config/roles.yaml
+
+# 运行时数据绝不能进入镜像构建上下文
+data/*
+!data/init_db.sql
+*.db
+*.db-*
+*.sqlite
+*.sqlite3
 
 # 文档
 docs/

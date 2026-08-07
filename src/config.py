@@ -178,6 +178,16 @@ class MCPConfig(BaseModel):
             raise ValueError(f"MCP服务器名称重复: {', '.join(duplicates)}")
         return self
 
+    @model_validator(mode="after")
+    def apply_command_environment_overrides(self):
+        for server in self.servers:
+            normalized_name = re.sub(r"[^A-Za-z0-9]", "_", server.name).upper()
+            environment_name = f"AL1S_MCP_{normalized_name}_COMMAND"
+            command = os.getenv(environment_name, "").strip()
+            if command:
+                server.command = command
+        return self
+
 
 class DevWorkspaceConfig(BaseModel):
     """隔离开发工作区与受控 Git 发布配置。"""
@@ -464,13 +474,13 @@ class AppConfig:
 
             class AppMetaConfig(BaseModel):
                 name: str = Field("AL1S-Bot", description="应用名称")
-                version: str = Field("1.0.0", description="应用版本")
+                version: str = Field("0.1.0", description="应用版本")
                 debug: bool = Field(False, description="是否启用调试日志")
 
         except Exception:
             # 非常规环境下的兜底（不应触发）
             class AppMetaConfig:  # type: ignore
-                def __init__(self, name="AL1S-Bot", version="1.0.0", debug=False):
+                def __init__(self, name="AL1S-Bot", version="0.1.0", debug=False):
                     self.name = name
                     self.version = version
                     self.debug = debug

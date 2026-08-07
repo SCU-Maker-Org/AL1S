@@ -1,62 +1,61 @@
 services:
   al1s-bot:
+    image: ghcr.io/scu-maker-org/al1s:${AL1S_IMAGE_TAG:-0.1.0}
     build:
       context: .
       dockerfile: Dockerfile
+      args:
+        AL1S_VERSION: ${AL1S_IMAGE_TAG:-0.1.0}
     container_name: al1s-bot
-    restart: always
+    restart: unless-stopped
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 512
+    stop_grace_period: 30s
 
-    # 挂载配置文件和数据
     volumes:
       - ./config.toml:/app/config.toml:ro
-      - ./logs:/app/logs
-      - ./data:/app/data
+      - al1s-data:/app/data
+      - al1s-logs:/app/logs
+      - app-cache:/app/.cache
       - npm-cache:/app/.npm
       - npm-global:/app/.npm-global
 
-    # 环境变量
+    tmpfs:
+      - /tmp:rw,nosuid,nodev,size=512m
+
     environment:
-      - PYTHONUNBUFFERED=1
-      - PYTHONDONTWRITEBYTECODE=1
-      - TZ=Asia/Shanghai
+      AL1S_MCP_GITHUB_COMMAND: github-mcp-server
+      PYTHONUNBUFFERED: "1"
+      PYTHONDONTWRITEBYTECODE: "1"
+      TZ: Asia/Shanghai
 
-    # 资源限制 - 增加内存以支持npm安装
-    # deploy:
-    #   resources:
-    #     limits:
-    #       memory: 1G
-    #       cpus: "1.0"
-    #     reservations:
-    #       memory: 512M
-    #       cpus: "0.5"
+    healthcheck:
+      test: ["CMD", "python", "scripts/container_healthcheck.py"]
+      interval: 60s
+      timeout: 15s
+      retries: 3
+      start_period: 5m
 
-    # 网络配置
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+
     networks:
       - al1s-bot-network
-
-    # 健康检查 - 验证Python和Node.js环境
-    healthcheck:
-      test: ["CMD", "sh", "-c", "python -c 'import sys; sys.exit(0)' && node --version"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 40s
-
-    # 日志配置
-    logging:
-      driver: "json-file"
-      options:
-        max-size: "10m"
-        max-file: "3"
 
 networks:
   al1s-bot-network:
     driver: bridge
 
 volumes:
-  logs:
-    driver: local
+  al1s-data:
+  al1s-logs:
+  app-cache:
   npm-cache:
-    driver: local
   npm-global:
-    driver: local

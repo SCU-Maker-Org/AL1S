@@ -48,5 +48,5 @@ __all__ = [
 ]
 
 # 版本信息
-__version__ = "1.0.0"
+__version__ = "0.1.0"
 __description__ = "统一 Agent 服务与任务编排系统"

@@ -1,6 +1,6 @@
 [project]
 name = "al1s-bot"
-version = "1.1.0"
+version = "0.1.0"
 description = "一个功能完整的Telegram聊天机器人，支持OpenAI聊天、RAG知识增强、角色定制和图片搜索"
 readme = "README.md"
 license = "MIT"
@@ -12,8 +12,7 @@ classifiers = [
     "Development Status :: 5 - Production/Stable",
     "Intended Audience :: Developers",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.11",
-    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
     "Topic :: Communications :: Chat",
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
@@ -46,10 +45,10 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/texasoct/al1s"
-Repository = "https://github.com/texasoct/al1s"
-Issues = "https://github.com/texasoct/al1s/issues"
-Documentation = "https://github.com/texasoct/al1s#README.md"
+Homepage = "https://github.com/SCU-Maker-Org/AL1S"
+Repository = "https://github.com/SCU-Maker-Org/AL1S"
+Issues = "https://github.com/SCU-Maker-Org/AL1S/issues"
+Documentation = "https://github.com/SCU-Maker-Org/AL1S#readme"
 
 [dependency-groups]
 dev = [
