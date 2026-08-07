@@ -483,17 +483,25 @@ class MCPService:
         user_id: Optional[int], chat_type: Any, admin_user_ids: List[int]
     ) -> str:
         """将 Telegram 调用方映射为 MCP 访问级别。"""
-        if user_id is not None and user_id in admin_user_ids:
-            return "admin"
         normalized_chat_type = getattr(chat_type, "value", chat_type)
+        if isinstance(normalized_chat_type, str):
+            normalized_chat_type = normalized_chat_type.lower()
+        if user_id is not None and user_id in admin_user_ids:
+            return "private_admin" if normalized_chat_type == "private" else "admin"
         if normalized_chat_type == "private":
             return "private"
         return "public"
 
     @staticmethod
     def _access_allowed(required: str, caller_access: str) -> bool:
-        ranks = {"public": 0, "private": 1, "admin": 2}
-        return ranks.get(caller_access, -1) >= ranks.get(required, 2)
+        ranks = {"public": 0, "private": 1, "admin": 2, "private_admin": 3}
+        required_rank = ranks.get(required)
+        caller_rank = ranks.get(caller_access)
+        return (
+            required_rank is not None
+            and caller_rank is not None
+            and caller_rank >= required_rank
+        )
 
     @classmethod
     def redact_sensitive_data(cls, value: Any) -> Any:

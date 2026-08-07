@@ -206,8 +206,70 @@ class AL1SBot:
         if self.mcp_service and self.config.mcp.enabled:
             # 转换配置格式
             mcp_configs = []
+            dev_config = self.config.dev_workspace
+            dev_server_names = {"dev-workspace", "git-publisher"}
+            dev_env = {
+                "AL1S_DEV_WORKSPACE_ROOT": str(
+                    Path(dev_config.root_dir).expanduser().resolve()
+                ),
+                "AL1S_DEV_MAX_WORKSPACES": str(dev_config.max_workspaces),
+                "AL1S_DEV_MAX_FILE_BYTES": str(dev_config.max_file_bytes),
+                "AL1S_DEV_MAX_OUTPUT_CHARS": str(dev_config.max_output_chars),
+                "AL1S_DEV_COMMAND_TIMEOUT": str(dev_config.command_timeout),
+                "AL1S_DEV_GIT_TIMEOUT": str(dev_config.git_timeout),
+                "AL1S_DEV_GIT_AUTHOR_NAME": dev_config.git_author_name,
+                "AL1S_DEV_GIT_AUTHOR_EMAIL": dev_config.git_author_email,
+                "AL1S_DEV_BRANCH_PREFIX": dev_config.branch_prefix,
+                "AL1S_DEV_RUNNER_ENABLED": str(dev_config.runner_enabled).lower(),
+                "AL1S_DEV_ALLOWED_GITHUB_OWNERS": ",".join(
+                    dev_config.allowed_github_owners
+                ),
+            }
+            publisher_token = dev_config.github_token.strip()
+            if not publisher_token:
+                github_server = next(
+                    (
+                        server
+                        for server in self.config.mcp.servers
+                        if server.name == "github"
+                    ),
+                    None,
+                )
+                if github_server is not None:
+                    publisher_token = github_server.env.get(
+                        "GITHUB_PERSONAL_ACCESS_TOKEN", ""
+                    ).strip()
+                    if publisher_token.startswith("${") and publisher_token.endswith(
+                        "}"
+                    ):
+                        publisher_token = ""
+
             for configured_server in self.config.mcp.servers:
                 if not configured_server.enabled:
+                    continue
+                if configured_server.name in dev_server_names:
+                    if not dev_config.enabled:
+                        logger.info(
+                            "Dev Workspace 未启用，跳过 MCP 服务器: {}",
+                            configured_server.name,
+                        )
+                        continue
+                    if configured_server.name == "git-publisher":
+                        if not dev_config.allowed_github_owners:
+                            logger.warning(
+                                "Git Publisher 未配置 allowed_github_owners，跳过发布工具"
+                            )
+                            continue
+                        if not publisher_token:
+                            logger.warning(
+                                "Git Publisher 缺少 GitHub Token，跳过发布工具"
+                            )
+                            continue
+                    dev_server = configured_server.model_copy(deep=True)
+                    dev_server.env.update(dev_env)
+                    if configured_server.name == "git-publisher":
+                        dev_server.env["AL1S_DEV_GITHUB_TOKEN"] = publisher_token
+                    mcp_configs.append(dev_server)
                     continue
                 if configured_server.name != "media":
                     mcp_configs.append(configured_server)
@@ -246,7 +308,7 @@ class AL1SBot:
                 await self.mcp_service.initialize_default_servers(mcp_configs)
 
                 # 显示已连接的工具
-                tools = self.mcp_service.get_available_tools("admin")
+                tools = self.mcp_service.get_available_tools("private_admin")
                 if tools:
                     logger.info(f"已加载 {len(tools)} 个MCP工具: {list(tools.keys())}")
                 else:

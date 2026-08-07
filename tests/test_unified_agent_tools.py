@@ -21,6 +21,53 @@ def _tool_call(call_id: str, name: str, arguments: str):
 
 
 @pytest.mark.asyncio
+async def test_private_admin_keeps_builtin_web_scraper_access():
+    agent = _agent()
+    agent.tool_handler = AsyncMock()
+    agent.openai_client = SimpleNamespace(
+        chat=SimpleNamespace(
+            completions=SimpleNamespace(
+                create=AsyncMock(
+                    return_value=SimpleNamespace(
+                        choices=[
+                            SimpleNamespace(
+                                message=SimpleNamespace(
+                                    content="latest result", tool_calls=[]
+                                )
+                            )
+                        ]
+                    )
+                )
+            )
+        )
+    )
+
+    result = await agent.chat_completion(
+        [{"role": "user", "content": "查看最新新闻"}],
+        enable_rag=False,
+        tool_access="private_admin",
+    )
+
+    assert result == "latest result"
+    tools = agent.openai_client.chat.completions.create.await_args.kwargs["tools"]
+    assert [tool["function"]["name"] for tool in tools] == ["web_scraper"]
+
+    agent.mcp_service = None
+    agent.database_service = None
+    agent._conversation_id_context = ContextVar("private_admin_web", default=None)
+    agent._scrape_webpage = AsyncMock(return_value="page contents")
+
+    assert (
+        await agent._handle_mcp_tool(
+            "web_scraper",
+            {"url": "https://example.com"},
+            caller_access="private_admin",
+        )
+        == "page contents"
+    )
+
+
+@pytest.mark.asyncio
 async def test_tool_results_follow_the_assistant_tool_call_message():
     agent = _agent()
     agent.tool_handler = AsyncMock(side_effect=["first result", "second result"])

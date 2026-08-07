@@ -198,7 +198,11 @@ class UnifiedAgentService:
 
             # 构建工具列表
             available_tools = list(tools or [])
-            if needs_web_access and self.tool_handler and tool_access == "admin":
+            if (
+                needs_web_access
+                and self.tool_handler
+                and tool_access in {"admin", "private_admin"}
+            ):
                 # 添加网页抓取工具
                 web_scraper_tool = {
                     "type": "function",
@@ -431,7 +435,7 @@ class UnifiedAgentService:
         try:
             # 处理自定义网页抓取工具
             if tool_name == "web_scraper":
-                if caller_access != "admin":
+                if caller_access not in {"admin", "private_admin"}:
                     result = "工具调用失败: 无权调用 web_scraper"
                     error_message = result
                 else:

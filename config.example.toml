@@ -137,6 +137,29 @@ max_artifact_bytes = 20000000
 retention_seconds = 3600
 
 # ====================
+# 隔离开发工作区
+# ====================
+# 总开关；还需要单独启用下方 dev-workspace / git-publisher MCP Server。
+[dev_workspace]
+enabled = false
+root_dir = "data/dev_workspaces"
+max_workspaces = 10
+max_file_bytes = 1000000
+max_output_chars = 30000
+command_timeout = 120
+git_timeout = 60
+git_author_name = "AL1S"
+git_author_email = "al1s@localhost"
+branch_prefix = "al1s/"
+# 仅对可信仓库启用白名单检查命令；不可信代码应改在容器/虚拟机中执行。
+# macOS sandbox-exec 只是纵深防护，不是完整的恶意代码安全边界。
+runner_enabled = false
+# 只允许克隆或推送这些 GitHub 用户/组织名下的仓库。
+allowed_github_owners = []
+# 可选；留空时读取 GITHUB_PERSONAL_ACCESS_TOKEN，也可复用下方 github MCP 的 Token。
+github_token = ""
+
+# ====================
 # LangChain 特定配置
 # ====================
 [langchain]
@@ -219,14 +242,42 @@ env = { TAVILY_API_KEY = "tvly-your-api-key", PATH = "/opt/homebrew/bin:/opt/hom
 access = "admin"
 tool_timeout = 45
 
-# GitHub 官方 MCP Server（需要先安装服务器和访问令牌）
+# GitHub 官方 MCP Server（需要先安装服务器和访问令牌）。
+# 创建仓库/PR 时移除 --read-only；写权限场景必须保持 private_admin。
 [[mcp.servers]]
 name = "github"
 command = "/absolute/path/to/github-mcp-server"
 args = ["stdio", "--read-only"]
 enabled = false
 env = { GITHUB_PERSONAL_ACCESS_TOKEN = "github_pat_your-token" }
-access = "admin"
+access = "private_admin"
+
+# 隔离工作区内的文件编辑、本地 Git 和受控检查命令。
+# 只有 Telegram 私聊中的全局管理员能看到 private_admin 工具。
+[[mcp.servers]]
+name = "dev-workspace"
+command = "uv"
+args = ["run", "python", "-m", "src.mcp_servers.dev_workspace_server"]
+enabled = false
+access = "private_admin"
+read_only = false
+include_tools = ["workspace_create", "workspace_list", "workspace_list_files", "workspace_read_file", "workspace_write_file", "workspace_edit_file", "workspace_search_text", "workspace_git_status", "workspace_git_diff", "workspace_git_create_branch", "workspace_git_checkout", "workspace_git_add", "workspace_git_commit", "workspace_git_log", "workspace_run_check"]
+connect_timeout = 60
+tool_timeout = 180
+max_result_chars = 30000
+
+# 只负责在隔离工作区中克隆允许 owner 的仓库，以及推送 al1s/* 分支。
+[[mcp.servers]]
+name = "git-publisher"
+command = "uv"
+args = ["run", "python", "-m", "src.mcp_servers.git_publisher_server"]
+enabled = false
+access = "private_admin"
+read_only = false
+include_tools = ["workspace_clone_github", "workspace_push_github"]
+connect_timeout = 60
+tool_timeout = 180
+max_result_chars = 30000
 
 # 通用网页抓取可访问本机/内网地址，必须保持管理员可见且默认关闭
 [[mcp.servers]]

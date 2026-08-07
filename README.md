@@ -282,7 +282,7 @@ env = { PATH = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin" }
 | `exclude_tools` | 排除匹配 glob 的工具，优先级高于 `include_tools` |
 | `tool_prefix` | 给该服务器的工具名加前缀，减少重名；仍冲突时程序会生成稳定别名 |
 | `read_only` | 只保留 MCP 元数据中明确标注 `readOnlyHint = true` 的工具；未标注的工具也会被过滤 |
-| `access` | `public` 允许群聊，`private` 仅允许私聊与管理员，`admin` 仅允许 `telegram.admin_user_ids` |
+| `access` | `public` 允许所有调用方，`private` 允许私聊和管理员，`admin` 仅允许全局管理员，`private_admin` 仅允许全局管理员与机器人的一对一私聊 |
 | `max_result_chars` | 截断过长的工具结果，避免一次调用耗尽模型上下文 |
 
 环境变量可写成完整的 `${ENV_NAME}` 引用，避免把密钥写进 `config.toml`：
@@ -359,6 +359,56 @@ tool_prefix = "repo_"
 ```
 
 不要把 Git 写工具、生产 SQLite、Home 目录或工作区根目录直接暴露给公共群聊。`read_only = true` 依赖服务器提供正确的 MCP 注解；对第三方服务器仍建议同时使用 `include_tools`。Context7 3.2.5 要求 Node.js `>=20.18.1`；如果 `npx` 启动到了错误的 Node.js，可用 `command -v node`、`command -v npx` 检查 PATH，并在服务器的 `env.PATH` 中显式把目标 Node.js 目录放在最前面。
+
+#### Dev Workspace：本地开发与 GitHub 发布
+
+Dev Workspace MCP 提供一个受限的本地开发闭环：在专用根目录中创建或克隆仓库、读写和搜索文件、查看 diff、创建 `al1s/*` 分支、暂存并提交，再通过 Git Publisher 推送功能分支。创建 GitHub 仓库、创建 Pull Request 和查看 CI 仍由 GitHub MCP 完成。
+
+如果 GitHub MCP 的启动参数包含 `--read-only`，需要在创建仓库或 Pull Request 前移除它，并把该 Server 的 `access` 设为 `private_admin`；否则 GitHub MCP 只能查询，或者会把写能力暴露给群聊管理员。
+
+这两个服务器默认关闭，而且必须使用 `access = "private_admin"`。该权限只会授予 `[telegram].admin_user_ids` 中、正在与机器人一对一私聊的用户；同一管理员在群聊中只有 `admin` 权限，不能看到或调用开发工具。`[dev_workspace].allowed_github_owners` 是强制发布边界，未配置 owner 或 Token 时 Git Publisher 不会启动。
+
+```toml
+[dev_workspace]
+enabled = true
+root_dir = "data/dev_workspaces"
+max_workspaces = 10
+max_file_bytes = 1000000
+max_output_chars = 30000
+command_timeout = 120
+git_timeout = 60
+git_author_name = "AL1S"
+git_author_email = "al1s@localhost"
+branch_prefix = "al1s/"
+runner_enabled = false
+allowed_github_owners = ["your-github-user-or-org"]
+# 推荐不写入文件，改用环境变量 GITHUB_PERSONAL_ACCESS_TOKEN。
+github_token = ""
+
+[[mcp.servers]]
+name = "dev-workspace"
+command = "uv"
+args = ["run", "python", "-m", "src.mcp_servers.dev_workspace_server"]
+enabled = true
+access = "private_admin"
+include_tools = ["workspace_create", "workspace_list", "workspace_list_files", "workspace_read_file", "workspace_write_file", "workspace_edit_file", "workspace_search_text", "workspace_git_status", "workspace_git_diff", "workspace_git_create_branch", "workspace_git_checkout", "workspace_git_add", "workspace_git_commit", "workspace_git_log", "workspace_run_check"]
+tool_timeout = 180
+
+[[mcp.servers]]
+name = "git-publisher"
+command = "uv"
+args = ["run", "python", "-m", "src.mcp_servers.git_publisher_server"]
+enabled = true
+access = "private_admin"
+include_tools = ["workspace_clone_github", "workspace_push_github"]
+tool_timeout = 180
+```
+
+Token 优先读取 `[dev_workspace].github_token`（空值时读取 `GITHUB_PERSONAL_ACCESS_TOKEN`），否则复用名为 `github` 的 MCP Server 的 `GITHUB_PERSONAL_ACCESS_TOKEN`。建议使用限定到所需仓库和 Contents 权限的细粒度 Token；不要授予仓库删除、Secrets 或账户管理权限。
+
+安全边界如下：所有路径都限制在 `root_dir` 下的单层工作区，拒绝路径穿越和符号链接逃逸；克隆与推送仅接受 GitHub HTTPS 仓库和允许的 owner；只允许推送配置前缀下的功能分支，不允许直推默认分支或 force push；不会向 Agent 暴露任意 Shell。`runner_enabled = true` 只启用服务器白名单内的检查命令，并要求宿主机具有可用的执行沙箱，但它仍会执行仓库代码。macOS `sandbox-exec` 只能作为纵深防护，不能替代容器、虚拟机或独立低权限账户；对不可信仓库应保持 `runner_enabled = false`。提交和推送会改变本地或远程状态，启用后应先要求 AL1S 展示 `workspace_git_diff` 和检查结果，再明确指示它提交、推送和创建 PR。
+
+典型流程为：`workspace_create` 或 `workspace_clone_github` -> 创建功能分支 -> 编辑文件 -> 运行检查并查看 diff -> `workspace_git_add` / `workspace_git_commit` -> `workspace_push_github` -> 使用 GitHub MCP 创建 Pull Request。Git Publisher 不负责新建 GitHub 仓库；需要先用 GitHub MCP 创建远程仓库，再推送工作区分支。
 
 ### 角色自定义
 

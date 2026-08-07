@@ -139,7 +139,7 @@ class MCPServerConfig(BaseModel):
     exclude_tools: list[str] = Field(default_factory=list)
     tool_prefix: str = Field(default="", pattern=r"^[A-Za-z0-9_-]*$", max_length=32)
     read_only: bool = False
-    access: Literal["public", "private", "admin"] = "admin"
+    access: Literal["public", "private", "admin", "private_admin"] = "admin"
     max_result_chars: int = Field(30000, ge=1000, le=200000)
 
     @model_validator(mode="after")
@@ -176,6 +176,94 @@ class MCPConfig(BaseModel):
         duplicates = sorted({name for name in names if names.count(name) > 1})
         if duplicates:
             raise ValueError(f"MCP服务器名称重复: {', '.join(duplicates)}")
+        return self
+
+
+class DevWorkspaceConfig(BaseModel):
+    """隔离开发工作区与受控 Git 发布配置。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = False
+    root_dir: str = Field("data/dev_workspaces", min_length=1)
+    max_workspaces: int = Field(10, ge=1, le=1000)
+    max_file_bytes: int = Field(1_000_000, ge=1024, le=100_000_000)
+    max_output_chars: int = Field(30_000, ge=1000, le=100_000)
+    command_timeout: int = Field(120, ge=1, le=3600)
+    git_timeout: int = Field(60, ge=1, le=600)
+    git_author_name: str = Field("AL1S", min_length=1, max_length=100)
+    git_author_email: str = Field("al1s@localhost", min_length=3, max_length=254)
+    branch_prefix: str = Field("al1s/", min_length=1, max_length=100)
+    runner_enabled: bool = False
+    allowed_github_owners: list[str] = Field(default_factory=list)
+    github_token: str = Field(
+        default_factory=lambda: os.getenv("GITHUB_PERSONAL_ACCESS_TOKEN", ""),
+        repr=False,
+    )
+
+    @field_validator("allowed_github_owners")
+    @classmethod
+    def normalize_allowed_github_owners(cls, value: list[str]) -> list[str]:
+        owners: list[str] = []
+        seen: set[str] = set()
+        for owner in value:
+            normalized = owner.strip()
+            if not normalized:
+                continue
+            if (
+                not re.fullmatch(
+                    r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?",
+                    normalized,
+                )
+                or "--" in normalized
+            ):
+                raise ValueError(f"无效的 GitHub owner: {normalized}")
+            folded = normalized.casefold()
+            if folded not in seen:
+                owners.append(normalized)
+                seen.add(folded)
+        return owners
+
+    @field_validator("branch_prefix")
+    @classmethod
+    def validate_branch_prefix(cls, value: str) -> str:
+        probe = f"{value}branch"
+        if (
+            not value.endswith("/")
+            or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._/-]{0,254}", probe)
+            or ".." in probe
+            or "//" in probe
+            or "@{" in probe
+            or any(
+                part.startswith(".")
+                or part.endswith(".")
+                or part.casefold().endswith(".lock")
+                for part in probe.split("/")
+            )
+        ):
+            raise ValueError(
+                "dev_workspace.branch_prefix 必须是以 / 结尾的安全 Git 前缀"
+            )
+        return value
+
+    @field_validator("git_author_name")
+    @classmethod
+    def validate_git_author_name(cls, value: str) -> str:
+        if any(ord(character) < 32 for character in value):
+            raise ValueError("Git 作者名称不能包含控制字符")
+        return value
+
+    @field_validator("git_author_email")
+    @classmethod
+    def validate_git_author_email(cls, value: str) -> str:
+        if not re.fullmatch(r"[^\s@<>]+@[^\s@<>]+", value):
+            raise ValueError("无效的 Git 作者邮箱")
+        return value
+
+    @model_validator(mode="after")
+    def resolve_github_token(self):
+        if not self.github_token:
+            self.github_token = os.getenv("GITHUB_PERSONAL_ACCESS_TOKEN", "")
         return self
 
 
@@ -360,6 +448,9 @@ class AppConfig:
         telegram_config = config_data.get("telegram", {}) if config_data else {}
         ascii2d_config = config_data.get("ascii2d", {}) if config_data else {}
         mcp_config = config_data.get("mcp", {}) if config_data else {}
+        dev_workspace_config = (
+            config_data.get("dev_workspace", {}) if config_data else {}
+        )
         rag_config = config_data.get("rag", {}) if config_data else {}
         profile_config = config_data.get("profile", {}) if config_data else {}
         media_config = config_data.get("media", {}) if config_data else {}
@@ -391,6 +482,7 @@ class AppConfig:
         self.telegram = TelegramConfig(**telegram_config)
         self.ascii2d = Ascii2DConfig(**ascii2d_config)
         self.mcp = MCPConfig(**mcp_config)
+        self.dev_workspace = DevWorkspaceConfig(**dev_workspace_config)
         self.rag = RAGConfig(**rag_config)
         self.profile = ProfileConfig(**profile_config)
         self.media = MediaConfig(**media_config)
