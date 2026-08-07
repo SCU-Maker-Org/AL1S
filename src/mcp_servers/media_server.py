@@ -21,9 +21,12 @@ import aiohttp
 from aiohttp.abc import AbstractResolver
 from mcp.server.fastmcp import FastMCP
 
-IMAGE_SIZES = frozenset(
+RECOMMENDED_IMAGE_SIZES = frozenset(
     {"2048x2048", "2688x1536", "1536x2688", "2368x1728", "1728x2368"}
 )
+IMAGE_SIZE_PATTERN = re.compile(r"([1-9][0-9]{1,4})[x*]([1-9][0-9]{1,4})")
+MIN_IMAGE_PIXELS = 512 * 512
+MAX_IMAGE_PIXELS = 2048 * 2048
 SPEECH_MODEL_VOICES = {
     "qwen-audio-3.0-tts-plus": frozenset(
         {
@@ -68,8 +71,16 @@ OWNER_TAG_PATTERN = re.compile(r"[0-9a-f]{64}")
 WORKSPACE_HOST_PATTERN = re.compile(
     r"^[a-z0-9][a-z0-9-]{1,126}\.(?:cn-beijing|ap-southeast-1)\.maas\.aliyuncs\.com$"
 )
-ARTIFACT_HOST_PATTERN = re.compile(
-    r"^dashscope-result-[a-z0-9-]+\.oss-[a-z0-9-]+\.aliyuncs\.com$"
+OSS_BUCKET_LABEL = r"[a-z0-9][a-z0-9-]{1,61}[a-z0-9]"
+ARTIFACT_HOST_PATTERNS = (
+    re.compile(
+        rf"^{OSS_BUCKET_LABEL}\.oss-(?![a-z0-9-]*internal\.)"
+        r"[a-z0-9-]+\.aliyuncs\.com$"
+    ),
+    re.compile(
+        rf"^{OSS_BUCKET_LABEL}\.(?![a-z0-9-]*internal\.)"
+        r"[a-z0-9-]+\.oss\.aliyuncs\.com$"
+    ),
 )
 REDIRECT_STATUSES = frozenset({301, 302, 303, 307, 308})
 ALLOWED_PROVIDER_HOSTS = frozenset(
@@ -269,8 +280,10 @@ def _normalize_artifact_url(value: str) -> str:
         raise RuntimeError("media artifact URL must use HTTPS")
     if not host or host.endswith(".") or not parsed.path.startswith("/"):
         raise RuntimeError("media provider returned an invalid artifact URL")
-    if not ARTIFACT_HOST_PATTERN.fullmatch(host):
-        raise RuntimeError("media artifact URL host is not a DashScope result bucket")
+    if not any(pattern.fullmatch(host) for pattern in ARTIFACT_HOST_PATTERNS):
+        raise RuntimeError(
+            "media artifact URL host is not an approved public OSS bucket"
+        )
     try:
         literal_address = ipaddress.ip_address(host)
     except ValueError:
@@ -384,6 +397,21 @@ def _validate_enum(value: str, *, field: str, allowed: Any) -> str:
         choices = ", ".join(sorted(allowed))
         raise ValueError(f"invalid {field}; expected one of: {choices}")
     return value
+
+
+def _validate_image_size(value: str) -> str:
+    if not isinstance(value, str):
+        raise ValueError("size must be a string")
+    match = IMAGE_SIZE_PATTERN.fullmatch(value.strip().lower())
+    if match is None:
+        raise ValueError("invalid size; expected WIDTHxHEIGHT")
+    width, height = (int(part) for part in match.groups())
+    pixels = width * height
+    if not MIN_IMAGE_PIXELS <= pixels <= MAX_IMAGE_PIXELS:
+        raise ValueError(
+            "invalid size; total pixels must be between 512x512 and 2048x2048"
+        )
+    return f"{width}x{height}"
 
 
 def _validate_capture_binding(capture_nonce: str, owner_tag: str) -> tuple[str, str]:
@@ -599,9 +627,14 @@ async def generate_image(
     al1s_capture_nonce: str,
     al1s_capture_owner: str,
 ) -> str:
-    """Generate one PNG with Qwen-Image and return its local artifact metadata."""
+    """Generate one PNG with Qwen-Image and return its local artifact metadata.
+
+    Size accepts WIDTHxHEIGHT or WIDTH*HEIGHT. For Qwen-Image 2.0, total pixels
+    must be between 512x512 and 2048x2048; recommended sizes include
+    2048x2048, 2688x1536, 1536x2688, 2368x1728, and 1728x2368.
+    """
     prompt = _validate_text(prompt, field="prompt", max_chars=MAX_IMAGE_PROMPT_CHARS)
-    size = _validate_enum(size, field="size", allowed=IMAGE_SIZES)
+    size = _validate_image_size(size)
     al1s_capture_nonce, al1s_capture_owner = _validate_capture_binding(
         al1s_capture_nonce, al1s_capture_owner
     )

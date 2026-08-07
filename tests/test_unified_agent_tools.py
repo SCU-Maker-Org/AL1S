@@ -130,6 +130,65 @@ async def test_tool_calls_can_continue_across_multiple_rounds():
 
 
 @pytest.mark.asyncio
+async def test_failed_media_tool_is_not_retried_in_same_agent_run():
+    agent = _agent()
+    agent.tool_handler = AsyncMock(return_value="工具调用失败: image generation failed")
+    retry_message = SimpleNamespace(
+        content=None,
+        tool_calls=[
+            _tool_call(
+                "call_image_retry",
+                "generate_image",
+                '{"prompt":"retry","size":"1024x1024"}',
+            )
+        ],
+    )
+    final_message = SimpleNamespace(
+        content="图片生成失败，请重新发起请求。", tool_calls=[]
+    )
+    completion_create = AsyncMock(
+        side_effect=[
+            SimpleNamespace(choices=[SimpleNamespace(message=retry_message)]),
+            SimpleNamespace(choices=[SimpleNamespace(message=final_message)]),
+        ]
+    )
+    agent.openai_client = SimpleNamespace(
+        chat=SimpleNamespace(completions=SimpleNamespace(create=completion_create))
+    )
+    first_message = SimpleNamespace(
+        content=None,
+        tool_calls=[
+            _tool_call(
+                "call_image",
+                "generate_image",
+                '{"prompt":"AL1S","size":"2048x2048"}',
+            )
+        ],
+    )
+
+    result = await agent._handle_tool_calls(
+        first_message,
+        [{"role": "user", "content": "生成一张 AL1S 图片"}],
+        [
+            {
+                "type": "function",
+                "function": {
+                    "name": "generate_image",
+                    "parameters": {"type": "object"},
+                },
+            }
+        ],
+    )
+
+    assert result == "图片生成失败，请重新发起请求。"
+    agent.tool_handler.assert_awaited_once()
+    assert "tools" not in completion_create.await_args_list[0].kwargs
+    retry_tool_result = completion_create.await_args_list[1].kwargs["messages"][-1]
+    assert retry_tool_result["name"] == "generate_image"
+    assert "不再自动重试" in retry_tool_result["content"]
+
+
+@pytest.mark.asyncio
 async def test_mcp_tool_uses_record_tool_call():
     agent = _agent()
     agent.mcp_service = SimpleNamespace(call_tool=AsyncMock(return_value="tool result"))

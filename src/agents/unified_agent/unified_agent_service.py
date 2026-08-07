@@ -22,6 +22,8 @@ from ...config import config
 from ...infra.vector import VectorService
 from ...services.learning_service import LearningService
 
+MEDIA_GENERATION_TOOLS = frozenset({"generate_image", "synthesize_speech"})
+
 
 class UnifiedAgentService:
     """统一 Agent 服务 - 整合 OpenAI、RAG 和 LangChain 功能"""
@@ -316,6 +318,7 @@ class UnifiedAgentService:
         """处理工具调用"""
         try:
             total_tool_calls = 0
+            failed_media_tools = set()
             for round_index in range(config.agent.max_tool_rounds):
                 prepared_calls = []
                 for index, tool_call in enumerate(assistant_message.tool_calls):
@@ -362,9 +365,19 @@ class UnifiedAgentService:
                     except (json.JSONDecodeError, TypeError):
                         arguments = {}
 
-                    result = await self.tool_handler(
-                        tool_name, arguments, caller_access
-                    )
+                    if tool_name in failed_media_tools:
+                        result = (
+                            "工具调用失败: 该媒体工具在本轮已经失败，为避免重复生成"
+                            "和重复计费，不再自动重试；请让用户重新发起请求。"
+                        )
+                    else:
+                        result = await self.tool_handler(
+                            tool_name, arguments, caller_access
+                        )
+                        if tool_name in MEDIA_GENERATION_TOOLS and str(
+                            result or ""
+                        ).startswith(("工具调用失败:", "工具调用超时:")):
+                            failed_media_tools.add(tool_name)
                     tool_results.append(
                         {
                             "tool_call_id": tool_call["id"],
@@ -381,8 +394,13 @@ class UnifiedAgentService:
                     "max_tokens": config.openai.max_tokens,
                     "temperature": config.openai.temperature,
                 }
-                if tools:
-                    api_params["tools"] = tools
+                active_tools = [
+                    tool
+                    for tool in (tools or [])
+                    if tool.get("function", {}).get("name") not in failed_media_tools
+                ]
+                if active_tools:
+                    api_params["tools"] = active_tools
                     api_params["tool_choice"] = "auto"
                 response = await self.openai_client.chat.completions.create(
                     **api_params

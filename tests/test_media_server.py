@@ -112,7 +112,7 @@ async def test_generate_image_calls_qwen_native_api_and_writes_artifact(
         "a storage engine diagram", **CAPTURE_BINDING
     )
     second_result = await media_server.generate_image(
-        "a storage engine diagram", **CAPTURE_BINDING
+        "a storage engine diagram", size="1024x1024", **CAPTURE_BINDING
     )
     first, first_path = _parse_artifact(first_result, media_environment)
     second, second_path = _parse_artifact(second_result, media_environment)
@@ -154,6 +154,7 @@ async def test_generate_image_calls_qwen_native_api_and_writes_artifact(
             },
         },
     )
+    assert provider_calls[1][1]["parameters"]["size"] == "1024*1024"
     assert download_calls[0][0].startswith(
         "https://dashscope-result-bj.oss-cn-beijing.aliyuncs.com/"
     )
@@ -226,7 +227,9 @@ async def test_synthesize_speech_calls_qwen_audio_and_writes_opus(
             {"prompt": "x" * (media_server.MAX_IMAGE_PROMPT_CHARS + 1)},
             "prompt exceeds",
         ),
-        ({"prompt": "x", "size": "1024x1024"}, "invalid size"),
+        ({"prompt": "x", "size": "not-a-size"}, "invalid size"),
+        ({"prompt": "x", "size": "511x512"}, "total pixels"),
+        ({"prompt": "x", "size": "4096x2048"}, "total pixels"),
     ],
 )
 async def test_generate_image_rejects_invalid_input(monkeypatch, kwargs, message):
@@ -370,6 +373,18 @@ def test_artifact_url_upgrades_aliyun_http_and_rejects_unsafe_urls():
         )
         == "https://dashscope-result-bj.oss-cn-beijing.aliyuncs.com/a.opus?sig=secret"
     )
+    accelerated_url = (
+        "https://dashscope-7c2c.oss-accelerate.aliyuncs.com/a.png?sig=secret"
+    )
+    assert media_server._normalize_artifact_url(accelerated_url) == accelerated_url
+    regional_url = (
+        "https://provider-results.oss-ap-southeast-1.aliyuncs.com/a.png?sig=secret"
+    )
+    assert media_server._normalize_artifact_url(regional_url) == regional_url
+    dual_stack_url = (
+        "https://provider-results.cn-beijing.oss.aliyuncs.com/a.png?sig=secret"
+    )
+    assert media_server._normalize_artifact_url(dual_stack_url) == dual_stack_url
 
     for value in (
         "http://example.com/a.png",
@@ -379,12 +394,18 @@ def test_artifact_url_upgrades_aliyun_http_and_rejects_unsafe_urls():
         "https://example.com:8443/a.png",
         "https://example.com/a.png#fragment",
         "https://public.example/a.png",
+        "https://provider-results.oss-cn-beijing-internal.aliyuncs.com/a.png",
+        "https://provider-results.cn-beijing-internal.oss.aliyuncs.com/a.png",
+        "https://provider-results.oss-accelerate.example.com/a.png",
+        "https://provider-results.oss-cn-beijing.aliyuncs.com.evil.test/a.png",
     ):
         with pytest.raises(RuntimeError):
             media_server._normalize_artifact_url(value)
 
     with pytest.raises(RuntimeError, match="non-public"):
         media_server._ensure_public_addresses(["127.0.0.1"], "localhost")
+    with pytest.raises(RuntimeError, match="non-public"):
+        media_server._ensure_public_addresses(["8.8.8.8", "127.0.0.1"], "mixed.example")
 
 
 @pytest.mark.asyncio
@@ -421,7 +442,7 @@ async def test_artifact_download_revalidates_redirect_without_forwarding_key(
         _FakeResponse(
             [],
             {
-                "Location": "https://dashscope-result-sh.oss-cn-shanghai.aliyuncs.com/final.opus"
+                "Location": "https://dashscope-7c2c.oss-accelerate.aliyuncs.com/final.opus"
             },
             status=302,
         ),
@@ -479,7 +500,7 @@ async def test_artifact_download_rejects_redirect_outside_result_buckets(monkeyp
         lambda **_kwargs: fake_session,
     )
 
-    with pytest.raises(RuntimeError, match="result bucket"):
+    with pytest.raises(RuntimeError, match="approved public OSS bucket"):
         await media_server._download_remote_artifact(
             "https://dashscope-result-bj.oss-cn-beijing.aliyuncs.com/start.png",
             media_format="png",
