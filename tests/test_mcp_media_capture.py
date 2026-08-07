@@ -65,6 +65,8 @@ def _capture_artifact(
     owner: str,
     relative_path: str = "image/result.png",
     content: bytes = b"png-content",
+    kind: str = "photo",
+    mime_type: str = "image/png",
 ):
     token = service.begin_media_capture(owner)
     capture = service._media_capture.get()
@@ -72,6 +74,8 @@ def _capture_artifact(
         outbox,
         relative_path,
         content,
+        kind=kind,
+        mime_type=mime_type,
         capture_nonce=capture.nonce,
         owner_tag=capture.owner_tag,
     )
@@ -323,16 +327,42 @@ def test_parent_symlink_swap_is_rejected_without_reading_outside_file(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_chat_handler_sends_open_descriptor_and_removes_artifact(tmp_path):
+async def test_chat_handler_sends_media_with_timeouts_and_removes_artifacts(tmp_path):
     outbox = tmp_path / "outbox"
     service = MCPService(media_output_dir=str(outbox))
     owner = "telegram:10:10:6:6"
-    artifact = _capture_artifact(service, outbox, owner=owner)
+    photo_artifact = _capture_artifact(service, outbox, owner=owner)
+    voice_artifact = _capture_artifact(
+        service,
+        outbox,
+        owner=owner,
+        relative_path="voice/result.ogg",
+        content=b"OggS-voice-content",
+        kind="voice",
+        mime_type="audio/ogg",
+    )
     sent = []
 
     class Bot:
         async def send_photo(self, **kwargs):
-            sent.append(kwargs["photo"].read())
+            sent.append(
+                (
+                    "photo",
+                    kwargs["photo"].read(),
+                    kwargs["read_timeout"],
+                    kwargs["write_timeout"],
+                )
+            )
+
+        async def send_voice(self, **kwargs):
+            sent.append(
+                (
+                    "voice",
+                    kwargs["voice"].read(),
+                    kwargs["read_timeout"],
+                    kwargs["write_timeout"],
+                )
+            )
 
         async def send_message(self, **kwargs):
             pytest.fail(f"unexpected send failure fallback: {kwargs}")
@@ -350,12 +380,16 @@ async def test_chat_handler_sends_open_descriptor_and_removes_artifact(tmp_path)
     await handler._send_media_artifacts(
         update,
         SimpleNamespace(bot=Bot()),
-        [artifact],
+        [photo_artifact, voice_artifact],
         owner=owner,
     )
 
-    assert sent == [b"png-content"]
-    assert not (outbox / artifact.relative_path).exists()
+    assert sent == [
+        ("photo", b"png-content", 60.0, 120.0),
+        ("voice", b"OggS-voice-content", 60.0, 120.0),
+    ]
+    assert not (outbox / photo_artifact.relative_path).exists()
+    assert not (outbox / voice_artifact.relative_path).exists()
 
 
 @pytest.mark.asyncio

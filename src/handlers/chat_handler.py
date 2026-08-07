@@ -469,6 +469,8 @@ class ChatHandler(BaseHandler):
                             photo=media_file,
                             filename=Path(artifact.relative_path).name,
                             caption=artifact.caption or None,
+                            read_timeout=config.telegram.media_read_timeout,
+                            write_timeout=config.telegram.media_write_timeout,
                             **reply_kwargs,
                         )
                     elif artifact.kind == "voice":
@@ -476,6 +478,8 @@ class ChatHandler(BaseHandler):
                             voice=media_file,
                             filename=Path(artifact.relative_path).name,
                             caption=artifact.caption or None,
+                            read_timeout=config.telegram.media_read_timeout,
+                            write_timeout=config.telegram.media_write_timeout,
                             **reply_kwargs,
                         )
                 logger.info(

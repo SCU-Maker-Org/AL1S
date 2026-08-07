@@ -99,6 +99,8 @@ class TelegramConfig(BaseModel):
     webhook_url: Optional[str] = Field("", description="Webhook URL（可选）")
     webhook_port: int = Field(8443, description="Webhook端口")
     admin_user_ids: list[int] = Field(default_factory=list)
+    media_read_timeout: float = Field(60.0, ge=1.0, le=600.0)
+    media_write_timeout: float = Field(120.0, ge=1.0, le=600.0)
     group: TelegramGroupConfig = Field(default_factory=TelegramGroupConfig)
     rate_limit: TelegramRateLimitConfig = Field(default_factory=TelegramRateLimitConfig)
 

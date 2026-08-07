@@ -331,7 +331,7 @@ tool_timeout = 240
 
 重启机器人后，`telegram.admin_user_ids` 中的管理员可以直接说“生成一张 PostgreSQL WAL 写入路径示意图，横向布局”，或“用语音读出这段故障复盘摘要”。图片由 `qwen-image-2.0-pro` 生成 PNG；语音由 `qwen-audio-3.0-tts-plus` 生成 Opus，并继续作为 Telegram 语音消息发送。Agent 会按需调用 `generate_image` 或 `synthesize_speech`。每次 Telegram update 都使用随机 nonce 和调用者绑定目录；机器人只接受受信 `media` server 的结果，并通过防符号链接的文件描述符复验路径、大小、MIME、TTL 和哈希，发送后立即清理。这不是 `/image` 或 `/voice` 固定命令；是否调用工具由 Agent 根据请求决定。
 
-DashScope 会先返回短期有效的 OSS 下载地址，且官方说明底层结果存储域可能动态变化。Media MCP 仅接受阿里云公网 OSS Bucket 域名（拒绝内网 Endpoint 和自定义域名），立即下载并逐跳检查 HTTPS、公网 DNS、重定向、Content-Type、实际字节数与 PNG/Opus 文件签名，且不会向 OSS 转发 API Key。语音消息默认带有“AI 生成语音”说明。图片提示词和待朗读文本会发送给 `[media].base_url` 对应的百炼区域，并可能记录在本地工具调用日志中；不要用它处理秘密或不应外发的内容。
+DashScope 会先返回短期有效的 OSS 下载地址，且官方说明底层结果存储域可能动态变化。Media MCP 仅接受阿里云公网 OSS Bucket 域名（拒绝内网 Endpoint 和自定义域名），立即下载并逐跳检查 HTTPS、公网 DNS、重定向、Content-Type、实际字节数与 PNG/Opus 文件签名，且不会向 OSS 转发 API Key。向 Telegram 发送图片或语音时，等待确认和上传的超时分别由 `[telegram].media_read_timeout`（默认 60 秒）和 `[telegram].media_write_timeout`（默认 120 秒）控制。语音消息默认带有“AI 生成语音”说明。图片提示词和待朗读文本会发送给 `[media].base_url` 对应的百炼区域，并可能记录在本地工具调用日志中；不要用它处理秘密或不应外发的内容。
 
 #### 高权限服务器
 
