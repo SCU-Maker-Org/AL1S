@@ -38,6 +38,11 @@ webhook_url = ""
 webhook_port = 8443
 # 可跨群执行管理员命令的 Telegram 用户 ID
 admin_user_ids = []
+# Telegram API 建连、读取、写入和连接池等待超时（秒）
+connect_timeout = 30
+read_timeout = 60
+write_timeout = 60
+pool_timeout = 10
 # 等待 Telegram 确认媒体发送结果的最长秒数
 media_read_timeout = 60
 # 上传图片或语音的最长秒数

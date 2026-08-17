@@ -11,6 +11,7 @@ from src.infra.mcp import (
     MEDIA_CAPTURE_OWNER_ARGUMENT,
     MCPServerConfig,
     MCPService,
+    _tool_log_summary,
 )
 
 
@@ -71,6 +72,17 @@ def _tool(name, *, read_only=None):
         inputSchema={"type": "object"},
         annotations=annotations,
     )
+
+
+def test_tool_log_summary_is_single_line_and_bounded():
+    description = "First line.\n\n" + ("Detailed instructions " * 20)
+
+    summary = _tool_log_summary(description)
+
+    assert "\n" not in summary
+    assert len(summary) <= 160
+    assert summary.startswith("First line. Detailed instructions")
+    assert summary.endswith("...")
 
 
 def test_mcp_config_rejects_duplicate_server_names():

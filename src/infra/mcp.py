@@ -38,6 +38,15 @@ except ImportError:
 MEDIA_CAPTURE_NONCE_ARGUMENT = "al1s_capture_nonce"
 MEDIA_CAPTURE_OWNER_ARGUMENT = "al1s_capture_owner"
 MAX_MEDIA_TTL_SECONDS = 7 * 24 * 60 * 60
+MAX_TOOL_LOG_DESCRIPTION_CHARS = 160
+
+
+def _tool_log_summary(description: Optional[str]) -> str:
+    """将 MCP 工具说明压缩为适合 INFO 日志的单行摘要。"""
+    summary = " ".join((description or "").split())
+    if len(summary) <= MAX_TOOL_LOG_DESCRIPTION_CHARS:
+        return summary
+    return summary[: MAX_TOOL_LOG_DESCRIPTION_CHARS - 3].rstrip() + "..."
 
 
 @dataclass(slots=True)
@@ -658,8 +667,19 @@ class MCPService:
                                             annotations, "destructiveHint"
                                         ),
                                     }
-                                    logger.info(
-                                        f"发现工具: {exposed_name} - {tool.description}"
+                                    description_summary = _tool_log_summary(
+                                        tool.description
+                                    )
+                                    if description_summary:
+                                        logger.info(
+                                            f"发现工具: {exposed_name} - "
+                                            f"{description_summary}"
+                                        )
+                                    else:
+                                        logger.info(f"发现工具: {exposed_name}")
+                                    logger.debug(
+                                        f"MCP工具完整描述 [{exposed_name}]: "
+                                        f"{tool.description}"
                                     )
                             if not tool_pages:
                                 logger.warning(

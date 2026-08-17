@@ -318,6 +318,8 @@ class AL1SBot:
 
     async def _post_init_callback(self, application):
         """应用初始化后的回调，用于初始化MCP服务器和RAG服务"""
+        await self._ensure_telegram_identity(application)
+
         if self.mcp_service:
             logger.info("正在初始化MCP服务...")
             await self._initialize_mcp_servers()
@@ -340,16 +342,41 @@ class AL1SBot:
                 logger.error(f"LangChain Agent 服务初始化失败: {e}")
                 self.langchain_agent_service = None
 
+    @staticmethod
+    async def _ensure_telegram_identity(application):
+        """修复 Telegram 初始化超时后缺失的 Bot 身份缓存。"""
+        try:
+            bot_user = application.bot.bot
+        except RuntimeError:
+            logger.warning("Telegram Bot 身份缓存缺失，正在重新验证连接...")
+            bot_user = await application.bot.get_me()
+
+        identity = f"@{bot_user.username}" if bot_user.username else str(bot_user.id)
+        logger.info(f"Telegram Bot 身份已确认: {identity}")
+        return bot_user
+
+    def _build_application(self):
+        telegram = self.config.telegram
+        return (
+            Application.builder()
+            .token(telegram.bot_token)
+            .connect_timeout(telegram.connect_timeout)
+            .read_timeout(telegram.read_timeout)
+            .write_timeout(telegram.write_timeout)
+            .pool_timeout(telegram.pool_timeout)
+            .get_updates_connect_timeout(telegram.connect_timeout)
+            .get_updates_read_timeout(telegram.read_timeout)
+            .get_updates_write_timeout(telegram.write_timeout)
+            .get_updates_pool_timeout(telegram.pool_timeout)
+            .concurrent_updates(True)
+            .build()
+        )
+
     def start(self):
         """启动机器人（支持优雅关闭的同步方法）"""
         try:
             # 创建应用
-            self.application = (
-                Application.builder()
-                .token(self.config.telegram.bot_token)
-                .concurrent_updates(True)
-                .build()
-            )
+            self.application = self._build_application()
 
             # 设置处理器
             self._setup_handlers()
@@ -357,13 +384,8 @@ class AL1SBot:
             # 设置错误处理器
             self.application.add_error_handler(self._error_handler)
 
-            # 设置应用初始化后的回调
-            if (
-                self.mcp_service
-                or self.unified_agent_service
-                or self.langchain_agent_service
-            ):
-                self.application.post_init = self._post_init_callback
+            # 始终验证 Telegram 身份；MCP/RAG 初始化也在这个回调中完成。
+            self.application.post_init = self._post_init_callback
 
             # 启动机器人
             logger.info("启动轮询模式...")
