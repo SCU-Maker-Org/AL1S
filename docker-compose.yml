@@ -29,6 +29,7 @@ services:
 
     environment:
       AL1S_MCP_GITHUB_COMMAND: github-mcp-server
+      DISCORD_BOT_TOKEN: ${DISCORD_BOT_TOKEN:-}
       PYTHONUNBUFFERED: "1"
       PYTHONDONTWRITEBYTECODE: "1"
       TZ: Asia/Shanghai

@@ -1,5 +1,5 @@
 """
-Telegram机器人主类
+AL1S 主控制器与 Telegram transport
 """
 
 import asyncio
@@ -22,6 +22,7 @@ from telegram.ext import (
 from .agents.langchain_agent_service import LangChainAgentService
 from .agents.unified_agent import UnifiedAgentService
 from .config import config
+from .discord_bot import DiscordBot
 from .handlers.chat_handler import ChatHandler
 from .handlers.command_handler import CommandHandler as CmdHandler
 from .handlers.image_handler import ImageHandler
@@ -188,6 +189,22 @@ class AL1SBot:
         # 处理器列表
         self.handlers = [self.chat_handler, self.image_handler]
 
+        self.discord_bot = None
+        if config.discord.enabled:
+            if config.discord.bot_token:
+                self.discord_bot = DiscordBot(
+                    config.discord,
+                    self.active_agent_service,
+                    self.conversation_service,
+                    mcp_service=self.mcp_service,
+                    database_service=self.database_service,
+                    rate_limit_service=self.rate_limit_service,
+                    user_profile_service=self.user_profile_service,
+                )
+                logger.info("Discord transport 已创建")
+            else:
+                logger.warning("Discord 已启用但 Token 未设置")
+
         logger.info("AL1S-Bot 初始化完成")
 
     def _create_tool_handler(self):
@@ -342,6 +359,20 @@ class AL1SBot:
                 logger.error(f"LangChain Agent 服务初始化失败: {e}")
                 self.langchain_agent_service = None
 
+        discord_bot = getattr(self, "discord_bot", None)
+        if discord_bot:
+            await discord_bot.start()
+
+    async def _post_shutdown_callback(self, application):
+        """关闭与 Telegram 共用事件循环的附加 transport 和 MCP 资源。"""
+        discord_bot = getattr(self, "discord_bot", None)
+        if discord_bot:
+            logger.info("正在关闭 Discord transport...")
+            await discord_bot.close()
+        if self.mcp_service:
+            logger.info("正在关闭 MCP 服务...")
+            await self.mcp_service.close_all()
+
     @staticmethod
     async def _ensure_telegram_identity(application):
         """修复 Telegram 初始化超时后缺失的 Bot 身份缓存。"""
@@ -386,6 +417,7 @@ class AL1SBot:
 
             # 始终验证 Telegram 身份；MCP/RAG 初始化也在这个回调中完成。
             self.application.post_init = self._post_init_callback
+            self.application.post_shutdown = self._post_shutdown_callback
 
             # 启动机器人
             logger.info("启动轮询模式...")
@@ -632,6 +664,13 @@ class AL1SBot:
                 await self.application.shutdown()
                 self.application = None
                 logger.info("机器人已停止")
+
+            discord_bot = getattr(self, "discord_bot", None)
+            if discord_bot:
+                await discord_bot.close()
+
+            if self.mcp_service:
+                await self.mcp_service.close_all()
         except Exception as e:
             logger.error(f"停止机器人时发生错误: {e}")
 

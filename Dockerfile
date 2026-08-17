@@ -9,7 +9,7 @@ ARG APP_UID=10001
 ARG APP_GID=10001
 
 LABEL org.opencontainers.image.title="AL1S" \
-      org.opencontainers.image.description="Telegram AI bot with RAG, MCP, media generation, and isolated development workspaces" \
+      org.opencontainers.image.description="Telegram and Discord AI bot with RAG, MCP, media generation, and isolated development workspaces" \
       org.opencontainers.image.version="${AL1S_VERSION}" \
       org.opencontainers.image.source="https://github.com/SCU-Maker-Org/AL1S" \
       org.opencontainers.image.licenses="MIT"

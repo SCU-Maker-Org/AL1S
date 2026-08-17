@@ -32,6 +32,15 @@ class InitializableService:
         self.events.append(self.name)
 
 
+class StartableTransport:
+    def __init__(self, events, name):
+        self.events = events
+        self.name = name
+
+    async def start(self):
+        self.events.append(self.name)
+
+
 @pytest.mark.asyncio
 async def test_post_init_repairs_identity_before_services():
     events = []
@@ -39,6 +48,7 @@ async def test_post_init_repairs_identity_before_services():
     controller.mcp_service = object()
     controller.unified_agent_service = InitializableService(events, "agent")
     controller.langchain_agent_service = None
+    controller.discord_bot = StartableTransport(events, "discord")
 
     async def initialize_mcp_servers():
         events.append("mcp")
@@ -48,7 +58,7 @@ async def test_post_init_repairs_identity_before_services():
 
     await controller._post_init_callback(application)
 
-    assert events == ["telegram", "mcp", "agent"]
+    assert events == ["telegram", "mcp", "agent", "discord"]
 
 
 def test_build_application_applies_telegram_timeouts():

@@ -78,6 +78,22 @@ per_chat_requests = 30
 per_chat_window_seconds = 60
 
 # ====================
+# Discord Bot 配置（可选）
+# ====================
+[discord]
+enabled = false
+# 推荐把 Token 写入未跟踪的 .env：DISCORD_BOT_TOKEN=...
+bot_token = "${DISCORD_BOT_TOKEN}"
+# Discord 用户 ID；仅这些用户在私聊中可调用 private_admin MCP
+admin_user_ids = []
+# 留空表示允许 Bot 已加入的所有服务器
+allowed_guild_ids = []
+allow_direct_messages = true
+sync_commands = true
+# 默认不把服务器频道聊天写入长期用户记忆
+enable_group_memory = false
+
+# ====================
 # Agent 配置 (核心配置)
 # ====================
 [agent]

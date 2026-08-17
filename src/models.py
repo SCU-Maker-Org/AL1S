@@ -197,7 +197,7 @@ class UserProfile(BaseModel):
 
 @dataclass(frozen=True, slots=True)
 class MediaArtifact:
-    """由 MCP 生成、等待 Telegram 发送的受控媒体产物。"""
+    """由 MCP 生成、等待聊天 transport 发送的受控媒体产物。"""
 
     artifact_id: str
     kind: Literal["photo", "voice"]

@@ -1,5 +1,5 @@
 """
-AL1S-Bot - 一个功能完整的Telegram聊天机器人
+AL1S-Bot - 支持 Telegram 与 Discord 的智能聊天机器人
 """
 
 __version__ = "0.1.0"

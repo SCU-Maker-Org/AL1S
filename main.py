@@ -4,6 +4,11 @@ AL1S-Bot 主程序入口
 """
 import atexit
 import os
+from pathlib import Path
+
+from dotenv import load_dotenv
+
+load_dotenv(Path(__file__).with_name(".env"))
 
 os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 os.environ.setdefault("HF_HUB_DISABLE_TELEMETRY", "1")
@@ -19,7 +24,6 @@ os.environ.setdefault("HF_HUB_DOWNLOAD_TIMEOUT", "300")
 os.environ.setdefault("HF_HUB_DOWNLOAD_RETRIES", "5")
 import signal
 import sys
-from pathlib import Path
 
 # 添加src目录到Python路径
 sys.path.insert(0, str(Path(__file__).parent / "src"))
@@ -118,7 +122,10 @@ def main():
     """主函数"""
     try:
         # 配置日志（根据配置中的 app.debug 决定级别）
-        debug_mode = bool(getattr(getattr(config, "app", None), "debug", False) or getattr(config, "debug", False))
+        debug_mode = bool(
+            getattr(getattr(config, "app", None), "debug", False)
+            or getattr(config, "debug", False)
+        )
 
         # 移除默认控制台 sink（默认是 DEBUG）
         logger.remove()

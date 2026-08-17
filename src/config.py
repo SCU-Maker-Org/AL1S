@@ -109,6 +109,27 @@ class TelegramConfig(BaseModel):
     rate_limit: TelegramRateLimitConfig = Field(default_factory=TelegramRateLimitConfig)
 
 
+class DiscordConfig(BaseModel):
+    """Discord Gateway 与命令配置。"""
+
+    enabled: bool = False
+    bot_token: str = Field("", description="Discord Bot Token", repr=False)
+    admin_user_ids: list[int] = Field(default_factory=list)
+    allowed_guild_ids: list[int] = Field(default_factory=list)
+    allow_direct_messages: bool = True
+    sync_commands: bool = True
+    enable_group_memory: bool = False
+
+    @field_validator("bot_token", mode="before")
+    @classmethod
+    def resolve_bot_token(cls, value: object) -> str:
+        """空值或显式环境变量引用均从进程环境读取。"""
+        raw_value = str(value or "").strip()
+        if raw_value in {"", "${DISCORD_BOT_TOKEN}"}:
+            return os.getenv("DISCORD_BOT_TOKEN", "").strip()
+        return raw_value
+
+
 class Ascii2DConfig(BaseModel):
     """Ascii2D配置"""
 
@@ -330,7 +351,7 @@ class ProfileConfig(BaseModel):
 
 
 class MediaConfig(BaseModel):
-    """Qwen Media MCP 及 Telegram 媒体派发配置。"""
+    """Qwen Media MCP 及聊天平台媒体派发配置。"""
 
     enabled: bool = False
     api_key: str = Field(
@@ -460,6 +481,7 @@ class AppConfig:
         app_meta_config = config_data.get("app", {}) if config_data else {}
         openai_config = config_data.get("openai", {}) if config_data else {}
         telegram_config = config_data.get("telegram", {}) if config_data else {}
+        discord_config = config_data.get("discord", {}) if config_data else {}
         ascii2d_config = config_data.get("ascii2d", {}) if config_data else {}
         mcp_config = config_data.get("mcp", {}) if config_data else {}
         dev_workspace_config = (
@@ -494,6 +516,7 @@ class AppConfig:
 
         self.openai = OpenAIConfig(**openai_config)
         self.telegram = TelegramConfig(**telegram_config)
+        self.discord = DiscordConfig(**discord_config)
         self.ascii2d = Ascii2DConfig(**ascii2d_config)
         self.mcp = MCPConfig(**mcp_config)
         self.dev_workspace = DevWorkspaceConfig(**dev_workspace_config)
@@ -545,6 +568,8 @@ class AppConfig:
             print("⚠️  警告: OpenAI API密钥未设置")
         if not self.telegram.bot_token:
             print("⚠️  警告: Telegram Bot Token未设置")
+        if self.discord.enabled and not self.discord.bot_token:
+            print("⚠️  警告: Discord 已启用但 DISCORD_BOT_TOKEN 未设置")
         if not self.roles:
             print("⚠️  警告: 未加载任何角色配置")
 

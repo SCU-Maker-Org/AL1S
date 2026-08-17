@@ -123,7 +123,7 @@ class MCPService:
         ).hexdigest()
 
     def begin_media_capture(self, owner: str) -> Token:
-        """为当前异步 Update 建立独立媒体收件箱。"""
+        """为当前异步请求建立独立媒体收件箱。"""
         state = _MediaCaptureState(
             nonce=secrets.token_urlsafe(32),
             owner_tag=self._media_owner_tag(owner),
@@ -491,7 +491,7 @@ class MCPService:
     def resolve_caller_access(
         user_id: Optional[int], chat_type: Any, admin_user_ids: List[int]
     ) -> str:
-        """将 Telegram 调用方映射为 MCP 访问级别。"""
+        """将聊天平台调用方映射为 MCP 访问级别。"""
         normalized_chat_type = getattr(chat_type, "value", chat_type)
         if isinstance(normalized_chat_type, str):
             normalized_chat_type = normalized_chat_type.lower()

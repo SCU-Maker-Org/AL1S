@@ -1,6 +1,6 @@
 # AL1S-Bot 🤖
 
-基于《蔚蓝档案》天童爱丽丝角色的智能 Telegram 机器人，集成 AI 对话、知识学习、工具调用等功能。
+基于《蔚蓝档案》天童爱丽丝角色的 Telegram / Discord 智能机器人，集成 AI 对话、知识学习、工具调用等功能。
 
 ## ✨ 核心特性
 
@@ -9,11 +9,12 @@
 - **📚 技术 RAG**: 文档分块、Qwen3 语义检索、SQLite FTS5 混合召回和来源引用
 - **👤 私有画像**: 由用户显式维护身份、技术栈与沟通偏好，仅在一对一私聊中注入
 - **🔧 工具集成**: 支持 MCP 协议，可调用文件系统、GitHub、搜索等工具
-- **🎙️ 媒体生成**: 可选的管理员级 Media MCP，可生成图片和 Telegram 语音
+- **🎙️ 媒体生成**: 可选的 Media MCP，可向 Telegram 或 Discord 发送图片和语音
 - **🔍 图片搜索**: 基于 Ascii2D 的图片反向搜索功能
 - **💾 持久存储**: SQLite 数据库存储对话历史和知识库
 - **🌐 多模型支持**: 兼容 OpenAI、月之暗面、DeepSeek 等 API
 - **👥 群聊与 Topic**: 支持提及、回复、唤醒词、白名单、会话隔离和群上下文旁听
+- **💬 Discord 接入**: 支持 `@AL1S`、私聊以及 `/ask`、`/ping`、`/reset`
 
 ## 🚀 快速开始
 
@@ -50,6 +51,29 @@ base_url = "https://api.openai.com/v1"  # 或其他兼容API
 bot_token = "your-telegram-bot-token"
 ```
 
+Discord 是可选 transport。Bot 安装到服务器后，将新生成的 Token 放在不会提交的
+`.env` 中，不要把 Token 发到聊天或写进受 Git 跟踪的文件：
+
+```bash
+cp .env.example .env
+# 编辑 .env，填写刚刚 Reset Token 后得到的新值
+chmod 600 .env
+```
+
+```toml
+[discord]
+enabled = true
+bot_token = "${DISCORD_BOT_TOKEN}"
+# 填写你的 Discord 用户 ID 后，私聊才具有 private_admin MCP 权限
+admin_user_ids = []
+allowed_guild_ids = []
+```
+
+Discord Developer Portal 只需启用 `bot` 和 `applications.commands` scope，并授予
+View Channels、Send Messages、Send Messages in Threads、Embed Links、Attach Files、
+Read Message History、Use Application Commands。默认实现不需要开启 Message Content、
+Server Members 或 Presence 特权 Intent；服务器频道仅处理明确的 `@AL1S` 和斜杠命令。
+
 ### 3. 初始化数据库
 
 ```bash
@@ -72,13 +96,14 @@ python main.py
 
 发布后的正式镜像地址为 `ghcr.io/scu-maker-org/al1s`，同时提供 `linux/amd64` 和
 `linux/arm64`。镜像内包含 Python 3.13、Node.js、uv、Git、GitHub MCP
-Server、RAG 脚本和知识清单，但不包含任何 API Key、Telegram Token 或运行时数据库。
+Server、RAG 脚本和知识清单，但不包含任何 API Key、Bot Token 或运行时数据库。
 
 ```bash
 cp config.example.toml config.toml
 # 编辑 config.toml，至少填写 OpenAI 兼容接口和 Telegram Token
 
 docker compose pull
+export DISCORD_BOT_TOKEN='刚刚重置得到的新Token' # 仅启用 Discord 时需要
 docker compose up -d --no-build
 docker compose ps
 docker compose logs -f al1s-bot
@@ -625,6 +650,13 @@ Forum Topic 的所有文本、图片、占位、错误和拆分回复都会携�
    - 确认 `observe_unmentioned_messages = true`，且消息未超过 `context_buffer_ttl`。
    - 缓冲按群和 Topic 隔离，不会从其他 Topic 读取。
 
+8. **Discord 中显示离线或不响应**
+   - 确认 `[discord].enabled = true`，且启动进程能够读取 `.env` 中的 `DISCORD_BOT_TOKEN`。
+   - 查看日志中的 `Discord Bot 已连接` 和 `Discord commands synced`；Token 无效时 Gateway 任务会明确报错。
+   - 服务器频道请使用明确的 `@AL1S` 或 `/ask`；普通未提及消息不会送入 Agent。
+   - `/ask` 首次同步时，全局命令可能延迟出现；实现也会对 Bot 当前所在服务器做一次即时 guild 同步。
+   - `allowed_guild_ids` 非空时，未列出的服务器不会被处理。
+
 ### 性能优化
 
 - **内存使用**: Qwen3 0.6B 的实际占用受设备、并发和运行库影响；资源紧张时减小 `embedding_batch_size`
@@ -634,7 +666,7 @@ Forum Topic 的所有文本、图片、占位、错误和拆分回复都会携�
 ## 🔒 安全注意事项
 
 1. **API 密钥**: 妥善保管 API 密钥，不要提交到版本控制
-2. **访问权限**: 高权限 MCP Server 使用 `access = "admin"`，并正确配置 `telegram.admin_user_ids`；目录权限与只读工具白名单仍是必要的第二层保护
+2. **访问权限**: 高权限 MCP Server 使用 `access = "admin"`，并正确配置 `telegram.admin_user_ids` 和 `discord.admin_user_ids`；目录权限与只读工具白名单仍是必要的第二层保护
 3. **数据隐私**: 定期清理敏感对话记录
 4. **网络安全**: 在生产环境中使用 HTTPS 和适当的防火墙设置
 
