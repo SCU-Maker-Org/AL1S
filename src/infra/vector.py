@@ -15,6 +15,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+import torch
 from loguru import logger
 
 os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
@@ -115,6 +116,31 @@ class EmbeddingModel:
         self.dimension = 1024
         logger.info("初始化 TF-IDF 嵌入模型")
 
+    @staticmethod
+    def _resolve_device(device: str) -> str:
+        mps_backend = getattr(torch.backends, "mps", None)
+        mps_available = bool(mps_backend and mps_backend.is_available())
+        cuda_available = torch.cuda.is_available()
+
+        if device == "auto":
+            if cuda_available:
+                return "cuda"
+            if mps_available:
+                return "mps"
+            return "cpu"
+        if device == "cuda" and not cuda_available:
+            raise RuntimeError(
+                "嵌入设备 cuda 不可用；请安装支持 CUDA 的 PyTorch，或改用 auto/cpu"
+            )
+        if device == "mps" and not mps_available:
+            raise RuntimeError(
+                "嵌入设备 mps 不可用；请在 Apple Silicon 上使用支持 MPS 的 "
+                "PyTorch，或改用 auto/cpu"
+            )
+        if device not in {"cpu", "cuda", "mps"}:
+            raise ValueError(f"不支持的嵌入设备: {device}")
+        return device
+
     def _init_sentence_transformer_model(self, model_name: str):
         """初始化 Sentence Transformer 模型"""
         if not SENTENCE_TRANSFORMERS_AVAILABLE:
@@ -122,9 +148,8 @@ class EmbeddingModel:
                 "sentence-transformers 未安装，无法使用 Sentence Transformer 模型"
             )
 
-        model_kwargs = {}
-        if self.device != "auto":
-            model_kwargs["device"] = self.device
+        self.device = self._resolve_device(self.device)
+        model_kwargs = {"device": self.device}
         if self.model_revision:
             model_kwargs["revision"] = self.model_revision
 

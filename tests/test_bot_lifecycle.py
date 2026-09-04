@@ -41,6 +41,11 @@ class StartableTransport:
         self.events.append(self.name)
 
 
+class FailingService:
+    async def initialize(self):
+        return False
+
+
 @pytest.mark.asyncio
 async def test_post_init_repairs_identity_before_services():
     events = []
@@ -61,7 +66,23 @@ async def test_post_init_repairs_identity_before_services():
     assert events == ["telegram", "mcp", "agent", "discord"]
 
 
-def test_build_application_applies_telegram_timeouts():
+@pytest.mark.asyncio
+async def test_post_init_rejects_agent_that_reports_initialization_failure():
+    events = []
+    controller = object.__new__(AL1SBot)
+    controller.mcp_service = None
+    controller.unified_agent_service = FailingService()
+    controller.langchain_agent_service = None
+    controller.discord_bot = None
+    application = SimpleNamespace(bot=RecoveringTelegramBot(events))
+
+    with pytest.raises(RuntimeError, match="统一 Agent 服务初始化失败"):
+        await controller._post_init_callback(application)
+
+
+def test_build_application_applies_timeouts_with_socks_proxy(monkeypatch):
+    monkeypatch.setenv("ALL_PROXY", "socks5://127.0.0.1:10808")
+    monkeypatch.setenv("NO_PROXY", "")
     controller = object.__new__(AL1SBot)
     controller.config = SimpleNamespace(
         telegram=TelegramConfig(

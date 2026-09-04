@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-from pathlib import Path
 
 import pytest
 
@@ -362,15 +361,101 @@ async def test_runner_wraps_fixed_profile_in_network_denied_macos_sandbox(
 
 
 @pytest.mark.asyncio
-async def test_runner_never_falls_back_when_sandbox_is_unavailable(
+async def test_runner_wraps_fixed_profile_in_network_denied_linux_sandbox(
     monkeypatch, workspace_environment
 ):
     await _create_plain_workspace()
+    git_metadata = workspace_environment / "demo" / ".git"
+    git_metadata.mkdir()
     monkeypatch.setenv("AL1S_DEV_RUNNER_ENABLED", "true")
-    monkeypatch.setattr(server.sys, "platform", "darwin")
+    monkeypatch.setattr(server.sys, "platform", "linux")
+    monkeypatch.setattr(
+        server.shutil,
+        "which",
+        lambda command, path=None: "/usr/bin/bwrap" if command == "bwrap" else None,
+    )
+    calls = []
+
+    async def fake_execute(argv, *, cwd, environment):
+        calls.append((tuple(argv), cwd, environment))
+        return server.ProcessResult(0, "compiled", "")
+
+    monkeypatch.setattr(server, "_execute_process", fake_execute)
+
+    result = json.loads(await server.workspace_run_check("demo", "python_compile"))
+
+    argv, cwd, environment = calls[0]
+    workspace = workspace_environment / "demo"
+    assert result["ok"] is True
+    assert argv[0] == "/usr/bin/bwrap"
+    assert "--unshare-all" in argv
+    assert "--unshare-user" in argv
+    assert "--disable-userns" in argv
+    assert "--cap-drop" in argv
+    assert ("--ro-bind", "/", "/") in zip(argv, argv[1:], argv[2:])
+    assert ("--bind", str(workspace), str(workspace)) in zip(argv, argv[1:], argv[2:])
+    assert ("--ro-bind", str(git_metadata), str(git_metadata)) in zip(
+        argv, argv[1:], argv[2:]
+    )
+    assert ("--tmpfs", "/home") in zip(argv, argv[1:])
+    assert ("--tmpfs", "/run") in zip(argv, argv[1:])
+    assert argv[-6:] == server.RUNNER_PROFILES["python_compile"]
+    assert cwd == workspace
+    assert environment["HOME"].startswith(str(workspace))
+    assert list(workspace.glob(".al1s-runner-*")) == []
+
+
+def test_linux_sandbox_preserves_uv_python_runtime_alias(monkeypatch, tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    runtime = tmp_path / "python-3.13.1"
+    (runtime / "bin").mkdir(parents=True)
+    (runtime / "bin" / "python3.13").touch()
+    runtime_alias = tmp_path / "python-3.13"
+    runtime_alias.symlink_to(runtime, target_is_directory=True)
+    toolchain = tmp_path / "venv"
+    (toolchain / "bin").mkdir(parents=True)
+    (toolchain / "bin" / "python").symlink_to(runtime_alias / "bin" / "python3.13")
+    monkeypatch.setattr(server.sys, "executable", str(toolchain / "bin" / "python"))
+    monkeypatch.setattr(server.sys, "prefix", str(toolchain))
+    monkeypatch.setattr(server.sys, "base_prefix", str(runtime))
+
+    argv = server._linux_sandbox_argv(
+        "/usr/bin/bwrap", (server.sys.executable, "-V"), workspace
+    )
+
+    assert ("--ro-bind", str(runtime), str(runtime_alias)) in zip(
+        argv, argv[1:], argv[2:]
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("platform", "message"),
+    [
+        ("darwin", "sandbox-exec is unavailable"),
+        ("linux", "bwrap is unavailable"),
+    ],
+)
+async def test_runner_never_falls_back_when_sandbox_is_unavailable(
+    monkeypatch, workspace_environment, platform, message
+):
+    await _create_plain_workspace()
+    monkeypatch.setenv("AL1S_DEV_RUNNER_ENABLED", "true")
+    monkeypatch.setattr(server.sys, "platform", platform)
     monkeypatch.setattr(server.shutil, "which", lambda command, path=None: None)
 
-    with pytest.raises(RuntimeError, match="sandbox-exec is unavailable"):
+    with pytest.raises(RuntimeError, match=message):
+        await server.workspace_run_check("demo", "pytest")
+
+
+@pytest.mark.asyncio
+async def test_runner_rejects_unsupported_platform(monkeypatch, workspace_environment):
+    await _create_plain_workspace()
+    monkeypatch.setenv("AL1S_DEV_RUNNER_ENABLED", "true")
+    monkeypatch.setattr(server.sys, "platform", "win32")
+
+    with pytest.raises(RuntimeError, match="unsupported on this platform"):
         await server.workspace_run_check("demo", "pytest")
 
 
@@ -380,6 +465,7 @@ async def test_runner_rejects_sandbox_infrastructure_failure(
 ):
     await _create_plain_workspace()
     monkeypatch.setenv("AL1S_DEV_RUNNER_ENABLED", "true")
+    monkeypatch.setattr(server.sys, "platform", "darwin")
     monkeypatch.setattr(server, "_sandbox_executable", lambda: "/usr/bin/sandbox-exec")
 
     async def failed_sandbox(argv, *, cwd, environment):

@@ -443,15 +443,146 @@ def _git_executable() -> str:
 
 
 def _sandbox_executable() -> str:
-    if sys.platform != "darwin":
-        raise RuntimeError("workspace checks require the macOS sandbox-exec sandbox")
-    executable = shutil.which("sandbox-exec", path=SAFE_PATH)
+    if sys.platform == "darwin":
+        name = "sandbox-exec"
+        expected = Path("/usr/bin/sandbox-exec")
+    elif sys.platform.startswith("linux"):
+        name = "bwrap"
+        expected = Path("/usr/bin/bwrap")
+    else:
+        raise RuntimeError("workspace checks are unsupported on this platform")
+
+    executable = shutil.which(name, path=SAFE_PATH)
     if not executable:
-        raise RuntimeError("sandbox-exec is unavailable; refusing to run checks")
-    resolved = str(Path(executable).resolve())
-    if resolved != "/usr/bin/sandbox-exec":
-        raise RuntimeError("untrusted sandbox-exec executable; refusing to run checks")
-    return resolved
+        raise RuntimeError(f"{name} is unavailable; refusing to run checks")
+    resolved = Path(executable).resolve()
+    if resolved != expected:
+        raise RuntimeError(f"untrusted {name} executable; refusing to run checks")
+    return str(resolved)
+
+
+def _macos_sandbox_argv(
+    sandbox: str, command: Sequence[str], workspace: Path
+) -> tuple[str, ...]:
+    return (
+        sandbox,
+        "-D",
+        f"WORKSPACE={workspace}",
+        "-D",
+        f"GIT_METADATA={workspace / '.git'}",
+        "-D",
+        f"USER_HOME={Path.home().resolve()}",
+        "-D",
+        f"TOOLCHAIN={Path(sys.prefix).resolve()}",
+        "-D",
+        f"PYTHON_RUNTIME={Path(sys.base_prefix).resolve()}",
+        "-p",
+        SANDBOX_PROFILE,
+        "--",
+        *command,
+    )
+
+
+def _linux_sandbox_argv(
+    sandbox: str, command: Sequence[str], workspace: Path
+) -> tuple[str, ...]:
+    home = Path.home().resolve()
+    masked_roots = [
+        path
+        for path in map(Path, ("/home", "/root", "/run", "/tmp", "/var/tmp"))
+        if path.is_dir()
+    ]
+    if not any(home == root or home.is_relative_to(root) for root in masked_roots):
+        masked_roots.append(home)
+
+    toolchain = Path(sys.prefix).resolve()
+    python_runtime = Path(sys.base_prefix).resolve()
+    if workspace in {toolchain, python_runtime}:
+        raise RuntimeError("workspace must not be the active Python runtime")
+
+    mounts = [
+        (workspace, workspace, "--bind"),
+        (toolchain, toolchain, "--ro-bind"),
+        (python_runtime, python_runtime, "--ro-bind"),
+    ]
+    executable_link = Path(sys.executable)
+    seen_links: set[Path] = set()
+    while executable_link.is_symlink() and executable_link not in seen_links:
+        seen_links.add(executable_link)
+        target = Path(os.readlink(executable_link))
+        executable_link = (
+            target
+            if target.is_absolute()
+            else Path(os.path.abspath(executable_link.parent / target))
+        )
+    if executable_link.parent.name == "bin":
+        runtime_alias = executable_link.parent.parent
+        resolved_alias = runtime_alias.resolve()
+        if resolved_alias != runtime_alias and resolved_alias == python_runtime:
+            mounts.append((resolved_alias, runtime_alias, "--ro-bind"))
+
+    git_metadata = workspace / ".git"
+    if git_metadata.is_dir() and not git_metadata.is_symlink():
+        mounts.append((git_metadata.resolve(), git_metadata.resolve(), "--ro-bind"))
+
+    unique_mounts: dict[Path, tuple[Path, str]] = {}
+    for source, destination, mode in mounts:
+        if mode == "--ro-bind" or destination not in unique_mounts:
+            unique_mounts[destination] = (source, mode)
+
+    mount_parents: set[Path] = set()
+    for destination in unique_mounts:
+        containing_roots = [
+            root
+            for root in masked_roots
+            if destination == root or destination.is_relative_to(root)
+        ]
+        if not containing_roots:
+            continue
+        masked_root = max(containing_roots, key=lambda path: len(path.parts))
+        relative = destination.relative_to(masked_root)
+        parent = masked_root
+        for part in relative.parts[:-1]:
+            parent /= part
+            mount_parents.add(parent)
+
+    arguments = [
+        sandbox,
+        "--die-with-parent",
+        "--new-session",
+        "--unshare-all",
+        "--unshare-user",
+        "--disable-userns",
+        "--cap-drop",
+        "ALL",
+        "--ro-bind",
+        "/",
+        "/",
+        "--dev",
+        "/dev",
+        "--proc",
+        "/proc",
+    ]
+    for masked_root in sorted(masked_roots, key=lambda path: len(path.parts)):
+        arguments.extend(("--tmpfs", str(masked_root)))
+    for parent in sorted(mount_parents, key=lambda path: (len(path.parts), str(path))):
+        arguments.extend(("--dir", str(parent)))
+    for destination, (source, mode) in sorted(
+        unique_mounts.items(), key=lambda item: (len(item[0].parts), str(item[0]))
+    ):
+        arguments.extend((mode, str(source), str(destination)))
+    arguments.extend(("--chdir", str(workspace), "--", *command))
+    return tuple(arguments)
+
+
+def _sandbox_argv(
+    sandbox: str, command: Sequence[str], workspace: Path
+) -> tuple[str, ...]:
+    if sys.platform == "darwin":
+        return _macos_sandbox_argv(sandbox, command, workspace)
+    if sys.platform.startswith("linux"):
+        return _linux_sandbox_argv(sandbox, command, workspace)
+    raise RuntimeError("workspace checks are unsupported on this platform")
 
 
 def _kill_process_group(process: asyncio.subprocess.Process) -> None:
@@ -1072,7 +1203,7 @@ async def workspace_git_log(
 
 @mcp.tool(structured_output=False)
 async def workspace_run_check(workspace: str, profile: str) -> str:
-    """Run one fixed check profile inside a network-denied macOS sandbox."""
+    """Run one fixed check profile inside a network-denied OS sandbox."""
     if not _runner_enabled():
         raise RuntimeError("workspace runner is disabled")
     if not isinstance(profile, str) or profile not in RUNNER_PROFILES:
@@ -1089,23 +1220,7 @@ async def workspace_run_check(workspace: str, profile: str) -> str:
 
     temporary = Path(tempfile.mkdtemp(prefix=".al1s-runner-", dir=workspace_path))
     try:
-        argv = (
-            sandbox,
-            "-D",
-            f"WORKSPACE={workspace_path}",
-            "-D",
-            f"GIT_METADATA={workspace_path / '.git'}",
-            "-D",
-            f"USER_HOME={Path.home().resolve()}",
-            "-D",
-            f"TOOLCHAIN={Path(sys.prefix).resolve()}",
-            "-D",
-            f"PYTHON_RUNTIME={Path(sys.base_prefix).resolve()}",
-            "-p",
-            SANDBOX_PROFILE,
-            "--",
-            *command,
-        )
+        argv = _sandbox_argv(sandbox, command, workspace_path)
         result = await _execute_process(
             argv,
             cwd=workspace_path,

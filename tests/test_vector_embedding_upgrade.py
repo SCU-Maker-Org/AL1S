@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from copy import deepcopy
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -57,6 +58,51 @@ def test_sentence_transformer_model_id_is_not_replaced(
     assert model.model_revision == "model-commit"
     assert model.query_prompt == "Instruct: retrieve relevant passages"
     assert model.dimension == 1024
+
+
+@pytest.mark.parametrize(
+    ("cuda_available", "mps_available", "expected"),
+    [(True, False, "cuda"), (False, True, "mps"), (False, False, "cpu")],
+)
+def test_auto_embedding_device_uses_available_backend(
+    monkeypatch,
+    fake_sentence_transformer,
+    cuda_available,
+    mps_available,
+    expected,
+):
+    monkeypatch.setattr(
+        vector_module,
+        "torch",
+        SimpleNamespace(
+            cuda=SimpleNamespace(is_available=lambda: cuda_available),
+            backends=SimpleNamespace(
+                mps=SimpleNamespace(is_available=lambda: mps_available)
+            ),
+        ),
+    )
+
+    model = EmbeddingModel("Qwen/Qwen3-Embedding-0.6B", device="auto")
+
+    assert model.device == expected
+    assert fake_sentence_transformer.instances[0].init_kwargs["device"] == expected
+
+
+@pytest.mark.parametrize("device", ["cuda", "mps"])
+def test_explicit_unavailable_embedding_device_is_rejected(
+    monkeypatch, fake_sentence_transformer, device
+):
+    monkeypatch.setattr(
+        vector_module,
+        "torch",
+        SimpleNamespace(
+            cuda=SimpleNamespace(is_available=lambda: False),
+            backends=SimpleNamespace(mps=SimpleNamespace(is_available=lambda: False)),
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match=rf"嵌入设备 {device} 不可用"):
+        EmbeddingModel("Qwen/Qwen3-Embedding-0.6B", device=device)
 
 
 @pytest.mark.asyncio

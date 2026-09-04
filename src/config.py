@@ -427,7 +427,7 @@ class AgentConfig(BaseModel):
         "97b0c614be4d77ee51c0cef4e5f07c00f9eb65b3",
         description="Hugging Face 模型 revision（提交哈希、标签或分支）",
     )
-    embedding_device: Literal["auto", "cpu", "mps", "cuda"] = "cpu"
+    embedding_device: Literal["auto", "cpu", "mps", "cuda"] = "auto"
     embedding_batch_size: int = Field(8, ge=1, le=128)
     vector_store_path: str = Field("data/vector_store", description="向量存储路径")
 
@@ -492,6 +492,25 @@ class AppConfig:
         media_config = config_data.get("media", {}) if config_data else {}
         agent_config = config_data.get("agent", {}) if config_data else {}
         lc_config = config_data.get("langchain", {}) if config_data else {}
+
+        if agent_config.get("type", "unified") == "langchain":
+            agent_config = dict(agent_config)
+            legacy_fields = {
+                "vector_store": "vector_store",
+                "embedding_model_name": "embedding_model",
+                "embedding_device": "embedding_device",
+            }
+            for legacy_name, canonical_name in legacy_fields.items():
+                if legacy_name not in lc_config:
+                    continue
+                legacy_value = lc_config[legacy_name]
+                configured_value = agent_config.get(canonical_name)
+                if configured_value is not None and configured_value != legacy_value:
+                    raise ValueError(
+                        f"[agent].{canonical_name} 与旧版 "
+                        f"[langchain].{legacy_name} 配置冲突"
+                    )
+                agent_config[canonical_name] = legacy_value
 
         # 初始化各个配置对象，使用默认值填充缺失的配置
         # 应用元配置（名称、版本、调试开关）

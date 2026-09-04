@@ -20,6 +20,20 @@
 
 ### 1. 环境准备
 
+项目通过 `.python-version` 固定 Python 3.13，`uv` 会在系统 Python 版本不同（例如
+Arch 当前为 Python 3.14）时自动安装并管理对应解释器。Arch Linux 可先安装基础工具：
+
+```bash
+sudo pacman -S --needed git uv
+
+# 按需安装：Node.js MCP、Dev Workspace 检查器、SQLite 命令行维护工具
+sudo pacman -S --needed nodejs npm bubblewrap sqlite
+```
+
+其他 Linux 发行版和 macOS 只需提供 `git` 与
+[`uv`](https://docs.astral.sh/uv/getting-started/installation/)；`node`/`npm`、
+`bubblewrap` 和 `sqlite3` 都只在对应可选功能启用时需要。
+
 ```bash
 # 克隆项目
 git clone https://github.com/SCU-Maker-Org/AL1S.git
@@ -76,11 +90,8 @@ Server Members 或 Presence 特权 Intent；服务器频道仅处理明确的 `@
 
 ### 3. 初始化数据库
 
-```bash
-# 自动创建数据库（首次运行时）
-mkdir -p data
-sqlite3 data/bot.db < data/init_db.sql
-```
+首次启动会自动创建 `data/bot.db` 并幂等执行 schema 迁移，无需预先安装或调用
+`sqlite3` 命令行工具。
 
 ### 4. 启动机器人
 
@@ -218,7 +229,7 @@ vector_store_path = "data/vector_store"
 # 嵌入模型选择
 embedding_model = "Qwen/Qwen3-Embedding-0.6B"
 embedding_revision = "97b0c614be4d77ee51c0cef4e5f07c00f9eb65b3"
-embedding_device = "cpu"  # cpu | mps | cuda | auto
+embedding_device = "auto"  # 自动选择 cuda | mps | cpu，也可显式指定
 embedding_batch_size = 8
 
 # 单次对话允许的工具调用上限
@@ -236,14 +247,26 @@ learning_threshold = 0.8
 - 当设置为 `"unified"` 时，使用统一 Agent，自动禁用 LangChain
 - 无需手动设置 `langchain.enabled`，系统会自动处理
 - 默认嵌入模型为 [`Qwen/Qwen3-Embedding-0.6B`](https://huggingface.co/Qwen/Qwen3-Embedding-0.6B)，支持中英文等多语言检索；`embedding_revision` 固定模型提交，查询会自动使用模型提供的 query prompt，向量会归一化后写入索引
-- `cpu` 是兼容性最好的设备；Apple Silicon 可尝试 `mps`，遇到算子兼容或内存问题时切回 `cpu`
+- `auto` 会依次选择可用的 CUDA、MPS 和 CPU；显式指定不可用设备会在初始化时给出错误，不会静默误报成功
+- `cpu` 是兼容性最好的设备；Apple Silicon 遇到 MPS 算子兼容或内存问题时可显式切回 `cpu`
 - 资源有限或不希望下载模型时可设为 `tfidf`，但语义检索效果会明显降低
 
 #### 首次下载与索引升级
 
 首次使用 Qwen3 时，Sentence Transformers 会从 Hugging Face 下载约 1.2 GB 的模型文件，启动时间取决于网络和磁盘速度。模型会写入本机 Hugging Face 缓存，之后启动无需重复下载。
 
-项目锁定 PyTorch `>=2.13,<2.14`。Apple Silicon 上，FAISS 与 PyTorch 的 OpenMP 运行时存在已知冲突；项目会先加载 Sentence Transformers/PyTorch，再导入 FAISS，请勿颠倒 [`src/infra/vector.py`](src/infra/vector.py) 中的顺序。可用 `uv sync --frozen` 恢复锁文件中的兼容版本。Linux 默认从 PyTorch 官方 CPU wheel 仓库安装，避免 Docker 镜像额外拉取整套 CUDA 运行时；需要 Linux CUDA 时应按目标 CUDA 版本调整 `tool.uv.sources` 后重新锁定。
+项目锁定 PyTorch `>=2.13,<2.14`。Apple Silicon 上，FAISS 与 PyTorch 的 OpenMP 运行时存在已知冲突；项目会先加载 Sentence Transformers/PyTorch，再导入 FAISS，请勿颠倒 [`src/infra/vector.py`](src/infra/vector.py) 中的顺序。可用 `uv sync --frozen` 恢复锁文件中的兼容版本。Linux 默认从 PyTorch 官方 CPU wheel 仓库安装，避免无 GPU 主机和 Docker 镜像额外拉取整套加速运行时。
+
+Linux GPU 主机可让 `uv` 根据 NVIDIA 或 AMD 驱动选择本机后端；这是本地环境覆盖，后续再次执行 `uv sync --frozen` 会恢复锁定的 CPU wheel：
+
+```bash
+uv sync --frozen --dev
+uv pip install --python .venv/bin/python --reinstall-package torch \
+  "torch>=2.13,<2.14" --torch-backend=auto
+.venv/bin/python -c "import torch; print(torch.__version__, torch.cuda.is_available())"
+```
+
+使用该本地 GPU 覆盖后，以 `.venv/bin/python main.py` 启动，避免 `uv run` 在启动前按锁文件恢复 CPU wheel。需要可复现的生产 GPU 部署时，应为目标加速后端维护并验证独立锁文件或镜像。
 
 向量目录包含索引清单，记录模型 ID、模型提交、维度、归一化方式、query prompt、索引格式和 generation。每代索引写入独立快照，再以清单原子切换；CLI 与在线 Bot 同时更新时使用跨进程锁和 generation CAS，旧进程不能覆盖新索引。升级前的 MiniLM 索引没有兼容清单时，程序会保留 SQLite 中的知识数据，并自动使用新模型重建 FAISS 索引；不要为此删除 `data/bot.db`。
 
@@ -340,7 +363,6 @@ read_only = true
 connect_timeout = 120
 tool_timeout = 45
 tool_prefix = "ctx7_"
-env = { PATH = "/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/bin:/bin" }
 
 # 文件系统工具：只开放明确目录，并要求服务器标注只读工具
 [[mcp.servers]]
@@ -350,7 +372,6 @@ args = ["-y", "@modelcontextprotocol/server-filesystem", "/absolute/path/to/allo
 read_only = true
 access = "admin"
 enabled = false
-env = { PATH = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin" }
 ```
 
 每个 `[[mcp.servers]]` 支持以下约束：
@@ -371,6 +392,10 @@ env = { PATH = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin" }
 ```toml
 env = { TAVILY_API_KEY = "${TAVILY_API_KEY}" }
 ```
+
+MCP 子进程默认继承启动 AL1S 时经过筛选的 `PATH` 和 `HOME`，不要复制某台机器的
+Homebrew、nvm 或系统绝对 PATH 到通用配置中。作为 systemd 服务运行时，应在 unit
+中明确设置包含所需 `uvx`/`npx` 的 `PATH`。
 
 启用的服务器缺少该环境变量时，配置校验会直接报错。服务器名称必须唯一，写错字段也会在启动时被拒绝。未填写 `access` 时按 `admin` 处理；需要先在 `[telegram].admin_user_ids` 中填写自己的 Telegram 用户 ID，管理员工具才会出现在该用户的 `/tools` 和 Agent 工具列表里。权限在工具展示和实际调用两层校验，不能通过猜测工具名绕过。
 
@@ -399,8 +424,8 @@ output_dir = "data/media_outbox"
 
 [[mcp.servers]]
 name = "media"
-command = "uv"
-args = ["run", "python", "-m", "src.mcp_servers.media_server"]
+command = "python"
+args = ["-m", "src.mcp_servers.media_server"]
 enabled = true
 access = "admin"
 read_only = false
@@ -468,8 +493,8 @@ github_token = ""
 
 [[mcp.servers]]
 name = "dev-workspace"
-command = "uv"
-args = ["run", "python", "-m", "src.mcp_servers.dev_workspace_server"]
+command = "python"
+args = ["-m", "src.mcp_servers.dev_workspace_server"]
 enabled = true
 access = "private_admin"
 include_tools = ["workspace_create", "workspace_list", "workspace_list_files", "workspace_read_file", "workspace_write_file", "workspace_edit_file", "workspace_search_text", "workspace_git_status", "workspace_git_diff", "workspace_git_create_branch", "workspace_git_checkout", "workspace_git_add", "workspace_git_commit", "workspace_git_log", "workspace_run_check"]
@@ -477,8 +502,8 @@ tool_timeout = 180
 
 [[mcp.servers]]
 name = "git-publisher"
-command = "uv"
-args = ["run", "python", "-m", "src.mcp_servers.git_publisher_server"]
+command = "python"
+args = ["-m", "src.mcp_servers.git_publisher_server"]
 enabled = true
 access = "private_admin"
 include_tools = ["workspace_clone_github", "workspace_push_github"]
@@ -487,7 +512,7 @@ tool_timeout = 180
 
 Token 优先读取 `[dev_workspace].github_token`（空值时读取 `GITHUB_PERSONAL_ACCESS_TOKEN`），否则复用名为 `github` 的 MCP Server 的 `GITHUB_PERSONAL_ACCESS_TOKEN`。建议使用限定到所需仓库和 Contents 权限的细粒度 Token；不要授予仓库删除、Secrets 或账户管理权限。
 
-安全边界如下：所有路径都限制在 `root_dir` 下的单层工作区，拒绝路径穿越和符号链接逃逸；克隆与推送仅接受 GitHub HTTPS 仓库和允许的 owner；只允许推送配置前缀下的功能分支，不允许直推默认分支或 force push；不会向 Agent 暴露任意 Shell。`runner_enabled = true` 只启用服务器白名单内的检查命令，并要求宿主机具有可用的执行沙箱，但它仍会执行仓库代码。macOS `sandbox-exec` 只能作为纵深防护，不能替代容器、虚拟机或独立低权限账户；对不可信仓库应保持 `runner_enabled = false`。提交和推送会改变本地或远程状态，启用后应先要求 AL1S 展示 `workspace_git_diff` 和检查结果，再明确指示它提交、推送和创建 PR。
+安全边界如下：所有路径都限制在 `root_dir` 下的单层工作区，拒绝路径穿越和符号链接逃逸；克隆与推送仅接受 GitHub HTTPS 仓库和允许的 owner；只允许推送配置前缀下的功能分支，不允许直推默认分支或 force push；不会向 Agent 暴露任意 Shell。`runner_enabled = true` 只启用服务器白名单内的检查命令，并要求 macOS 提供系统 `sandbox-exec`，或 Linux 提供 `/usr/bin/bwrap`（Arch 包名为 `bubblewrap`）。Linux 后端会断开网络、隐藏 Home 与运行时目录、只读挂载宿主文件系统和 `.git`，仅允许写目标工作区；两种沙箱都只是纵深防护，不能替代容器、虚拟机或独立低权限账户。对不可信仓库应保持 `runner_enabled = false`。提交和推送会改变本地或远程状态，启用后应先要求 AL1S 展示 `workspace_git_diff` 和检查结果，再明确指示它提交、推送和创建 PR。
 
 典型流程为：`workspace_create` 或 `workspace_clone_github` -> 创建功能分支 -> 编辑文件 -> 运行检查并查看 diff -> `workspace_git_add` / `workspace_git_commit` -> `workspace_push_github` -> 使用 GitHub MCP 创建 Pull Request。Git Publisher 不负责新建 GitHub 仓库；需要先用 GitHub MCP 创建远程仓库，再推送工作区分支。
 
@@ -633,7 +658,7 @@ Forum Topic 的所有文本、图片、占位、错误和拆分回复都会携�
    - 模型下载或索引写入失败时，检查网络、磁盘空间和目录权限，然后重启或执行 `/rebuild_index`。
 
 5. **MCP 服务器连接失败**
-   - 使用 `command -v npx` 和 `command -v uvx` 确认启动命令存在；macOS 上还要留意 IDE 自带 Node.js 是否遮蔽 Homebrew Node.js。
+   - 使用 `command -v npx` 和 `command -v uvx` 确认启动命令存在；同时检查启动 Bot 的终端或 systemd unit 是否使用了预期 PATH。
    - 首次运行 `npx`/`uvx` 服务器可能下载包，可适当提高 `connect_timeout`。
    - 查看 `/mcp_status` 和 `logs/bot.log` 中对应服务器的错误；某服务器失败不会阻止其他服务器连接。
    - `read_only = true` 后工具列表为空，通常表示该服务器没有提供 `readOnlyHint` 注解，请改用严格的 `include_tools` 白名单并自行审计工具行为。

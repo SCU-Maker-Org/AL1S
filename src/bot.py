@@ -5,6 +5,7 @@ AL1S 主控制器与 Telegram transport
 import asyncio
 import html
 import io
+import sys
 from pathlib import Path
 from typing import Dict, Optional
 
@@ -37,6 +38,14 @@ from .services.user_profile_service import (
     UserProfileService,
 )
 from .utils.database_logger import init_database_logger
+
+LOCAL_MCP_MODULES = frozenset(
+    {
+        "src.mcp_servers.dev_workspace_server",
+        "src.mcp_servers.git_publisher_server",
+        "src.mcp_servers.media_server",
+    }
+)
 
 
 class AL1SBot:
@@ -261,9 +270,17 @@ class AL1SBot:
                     ):
                         publisher_token = ""
 
-            for configured_server in self.config.mcp.servers:
+            for server_config in self.config.mcp.servers:
+                configured_server = server_config.model_copy(deep=True)
                 if not configured_server.enabled:
                     continue
+                if (
+                    configured_server.command in {"python", "python3"}
+                    and len(configured_server.args) >= 2
+                    and configured_server.args[0] == "-m"
+                    and configured_server.args[1] in LOCAL_MCP_MODULES
+                ):
+                    configured_server.command = sys.executable
                 if configured_server.name in dev_server_names:
                     if not dev_config.enabled:
                         logger.info(
@@ -282,7 +299,7 @@ class AL1SBot:
                                 "Git Publisher 缺少 GitHub Token，跳过发布工具"
                             )
                             continue
-                    dev_server = configured_server.model_copy(deep=True)
+                    dev_server = configured_server
                     dev_server.env.update(dev_env)
                     if configured_server.name == "git-publisher":
                         dev_server.env["AL1S_DEV_GITHUB_TOKEN"] = publisher_token
@@ -299,7 +316,7 @@ class AL1SBot:
                         "Media MCP 缺少 DASHSCOPE_API_KEY，跳过图片与语音工具"
                     )
                     continue
-                media_server = configured_server.model_copy(deep=True)
+                media_server = configured_server
                 media_server.env.update(
                     {
                         "AL1S_MEDIA_DASHSCOPE_API_KEY": self.config.media.api_key,
@@ -345,19 +362,24 @@ class AL1SBot:
         if self.unified_agent_service:
             logger.info("正在初始化统一 Agent 服务...")
             try:
-                await self.unified_agent_service.initialize()
+                initialized = await self.unified_agent_service.initialize()
+                if initialized is False:
+                    raise RuntimeError("统一 Agent 服务返回初始化失败")
                 logger.info("统一 Agent 服务初始化完成")
             except Exception as e:
                 logger.error(f"统一 Agent 服务初始化失败: {e}")
+                raise RuntimeError("统一 Agent 服务初始化失败") from e
 
         if self.langchain_agent_service:
             logger.info("正在初始化 LangChain Agent 服务...")
             try:
-                await self.langchain_agent_service.initialize()
+                initialized = await self.langchain_agent_service.initialize()
+                if initialized is False:
+                    raise RuntimeError("LangChain Agent 服务返回初始化失败")
                 logger.info("LangChain Agent 服务初始化完成")
             except Exception as e:
                 logger.error(f"LangChain Agent 服务初始化失败: {e}")
-                self.langchain_agent_service = None
+                raise RuntimeError("LangChain Agent 服务初始化失败") from e
 
         discord_bot = getattr(self, "discord_bot", None)
         if discord_bot:

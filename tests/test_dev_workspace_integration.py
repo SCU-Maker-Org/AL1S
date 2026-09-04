@@ -1,3 +1,4 @@
+import sys
 from types import SimpleNamespace
 
 import pytest
@@ -88,6 +89,39 @@ def test_dev_workspace_rejects_unsafe_publish_settings():
         DevWorkspaceConfig(git_author_email="not-an-email")
 
 
+def test_app_config_migrates_legacy_langchain_device(monkeypatch):
+    monkeypatch.setattr(
+        AppConfig,
+        "_load_unified_config",
+        lambda self: {
+            "agent": {"type": "langchain"},
+            "langchain": {
+                "embedding_model_name": "legacy/model",
+                "embedding_device": "cuda",
+            },
+        },
+    )
+
+    loaded = AppConfig()
+
+    assert loaded.agent.embedding_model == "legacy/model"
+    assert loaded.agent.embedding_device == "cuda"
+
+
+def test_app_config_rejects_conflicting_legacy_langchain_device(monkeypatch):
+    monkeypatch.setattr(
+        AppConfig,
+        "_load_unified_config",
+        lambda self: {
+            "agent": {"type": "langchain", "embedding_device": "auto"},
+            "langchain": {"embedding_device": "cuda"},
+        },
+    )
+
+    with pytest.raises(ValueError, match="配置冲突"):
+        AppConfig()
+
+
 @pytest.mark.asyncio
 async def test_bot_injects_dev_environment_and_reuses_github_mcp_token(
     monkeypatch, tmp_path
@@ -106,12 +140,14 @@ async def test_bot_injects_dev_environment_and_reuses_github_mcp_token(
                 MCPServerConfig(
                     name="dev-workspace",
                     command="python",
+                    args=["-m", "src.mcp_servers.dev_workspace_server"],
                     enabled=True,
                     access="private_admin",
                 ),
                 MCPServerConfig(
                     name="git-publisher",
                     command="python",
+                    args=["-m", "src.mcp_servers.git_publisher_server"],
                     enabled=True,
                     access="private_admin",
                 ),
@@ -133,6 +169,8 @@ async def test_bot_injects_dev_environment_and_reuses_github_mcp_token(
     assert configs["dev-workspace"].env["AL1S_DEV_WORKSPACE_ROOT"] == expected_root
     assert configs["dev-workspace"].env["AL1S_DEV_MAX_WORKSPACES"] == "10"
     assert configs["dev-workspace"].env["AL1S_DEV_RUNNER_ENABLED"] == "false"
+    assert configs["dev-workspace"].command == sys.executable
+    assert configs["git-publisher"].command == sys.executable
     assert configs["git-publisher"].env["AL1S_DEV_GITHUB_TOKEN"] == "fallback-token"
     assert configs["git-publisher"].env["AL1S_DEV_ALLOWED_GITHUB_OWNERS"] == "octo-org"
 
