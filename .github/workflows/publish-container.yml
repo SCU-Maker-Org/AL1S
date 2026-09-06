@@ -1,129 +1,73 @@
-name: Publish container
+name: Publish OCI images
 
 on:
   release:
-    types:
-      - published
+    types: [published]
   workflow_dispatch:
     inputs:
       version:
         description: Version without the v prefix; must match pyproject.toml
         required: true
-        default: 0.1.0
+        default: 2.0.0
         type: string
       publish:
-        description: Push the tested image to GHCR
+        description: Push signed images to GHCR
         required: true
         default: false
         type: boolean
-      publish_latest:
-        description: Also update the latest tag
-        required: true
-        default: false
-        type: boolean
-
-permissions:
-  contents: read
 
 concurrency:
-  group: publish-container-${{ github.event.release.tag_name || inputs.version || github.run_id }}
+  group: publish-images
   cancel-in-progress: false
 
 jobs:
   prepare:
-    name: Validate release metadata
     runs-on: ubuntu-24.04
-    timeout-minutes: 5
     outputs:
-      version: ${{ steps.release.outputs.version }}
-      series: ${{ steps.release.outputs.series }}
-      publish: ${{ steps.release.outputs.publish }}
-      publish_latest: ${{ steps.release.outputs.publish_latest }}
+      version: ${{ steps.version.outputs.version }}
+      publish: ${{ steps.version.outputs.publish }}
     steps:
-      - name: Check out repository
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-
-      - name: Validate version and trigger
-        id: release
-        shell: bash
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - id: version
         env:
           EVENT_NAME: ${{ github.event_name }}
           RELEASE_TAG: ${{ github.event.release.tag_name }}
-          RELEASE_PRERELEASE: ${{ github.event.release.prerelease }}
           INPUT_VERSION: ${{ inputs.version }}
           INPUT_PUBLISH: ${{ inputs.publish }}
-          INPUT_PUBLISH_LATEST: ${{ inputs.publish_latest }}
         run: |
           set -euo pipefail
-
-          if [[ "${EVENT_NAME}" == "release" ]]; then
+          if [[ "$EVENT_NAME" == "release" ]]; then
             version="${RELEASE_TAG#v}"
             publish=true
-            if [[ "${RELEASE_PRERELEASE}" == "true" ]]; then
-              publish_latest=false
-            else
-              publish_latest=true
-            fi
           else
             version="${INPUT_VERSION#v}"
-            publish="${INPUT_PUBLISH}"
-            publish_latest="${INPUT_PUBLISH_LATEST}"
+            publish="$INPUT_PUBLISH"
           fi
-
-          if [[ ! "${version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            echo "Version must use stable SemVer X.Y.Z: ${version}" >&2
-            exit 1
-          fi
-
           project_version=$(python -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')
-          if [[ "${version}" != "${project_version}" ]]; then
-            echo "Release version ${version} does not match pyproject.toml ${project_version}" >&2
-            exit 1
-          fi
+          test "$version" = "$project_version"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "publish=$publish" >> "$GITHUB_OUTPUT"
 
-          if [[ "${publish_latest}" == "true" && "${publish}" != "true" ]]; then
-            echo "publish_latest requires publish=true" >&2
-            exit 1
-          fi
-
-          echo "version=${version}" >> "${GITHUB_OUTPUT}"
-          echo "series=${version%.*}" >> "${GITHUB_OUTPUT}"
-          echo "publish=${publish}" >> "${GITHUB_OUTPUT}"
-          echo "publish_latest=${publish_latest}" >> "${GITHUB_OUTPUT}"
-
-  tests:
-    name: Python tests
+  quality:
     needs: prepare
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
     steps:
-      - name: Check out repository
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-
-      - name: Install uv
-        uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7
         with:
           version: 0.11.19
-          enable-cache: true
-          cache-dependency-glob: uv.lock
-
-      - name: Install Python 3.13
-        run: uv python install 3.13
-
-      - name: Install locked dependencies
-        run: uv sync --frozen --dev
-
-      - name: Validate and test
-        run: |
-          uv lock --check
-          uv run python -m compileall -q main.py src scripts
-          uv run pytest -q
+      - run: uv python install 3.13
+      - run: uv sync --frozen --group dev --extra proxy
+      - run: uv lock --check
+      - run: >-
+          uv export --frozen --no-dev --extra proxy --extra workspace --no-emit-project
+          --format requirements-txt |
+          uvx --from pip-audit==2.10.1 pip-audit -r /dev/stdin
+      - run: uv run ruff format --check src tests
+      - run: uv run ruff check src tests
 
   smoke:
-    name: Smoke test (${{ matrix.platform }})
-    needs:
-      - prepare
-      - tests
+    needs: [prepare, quality]
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     strategy:
@@ -132,83 +76,125 @@ jobs:
         include:
           - platform: linux/amd64
             arch: amd64
+            target: core
+            tag: al1s:smoke-amd64
           - platform: linux/arm64
             arch: arm64
+            target: core
+            tag: al1s:smoke-arm64
+          - platform: linux/amd64
+            arch: amd64
+            target: workspace-runner
+            tag: al1s-workspace:smoke-amd64
+          - platform: linux/arm64
+            arch: arm64
+            target: workspace-runner
+            tag: al1s-workspace:smoke-arm64
     steps:
-      - name: Check out repository
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
-
-      - name: Build smoke-test image
-        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
           context: .
-          load: true
+          file: deploy/Containerfile
+          target: ${{ matrix.target }}
           platforms: ${{ matrix.platform }}
+          load: true
           push: false
-          tags: al1s:smoke-${{ matrix.arch }}
+          tags: ${{ matrix.tag }}
           build-args: AL1S_VERSION=${{ needs.prepare.outputs.version }}
-          cache-from: type=gha,scope=smoke-${{ matrix.arch }}
-          cache-to: type=gha,mode=max,scope=smoke-${{ matrix.arch }}
-
-      - name: Run image smoke test
-        run: docker run --rm --platform ${{ matrix.platform }} al1s:smoke-${{ matrix.arch }} python scripts/container_healthcheck.py --smoke
+          cache-from: type=gha,scope=smoke-${{ matrix.target }}-${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=smoke-${{ matrix.target }}-${{ matrix.arch }}
+      - name: Run core smoke test
+        if: matrix.target == 'core'
+        run: |
+          docker run --rm --platform ${{ matrix.platform }} --entrypoint al1s \
+            ${{ matrix.tag }} --config /usr/share/al1s/config.example.toml db migrate
+      - name: Run workspace smoke test
+        if: matrix.target == 'workspace-runner'
+        run: |
+          docker run --rm --platform ${{ matrix.platform }} --entrypoint python \
+            ${{ matrix.tag }} -c "import al1s.workspace.server"
 
   publish:
-    name: Publish multi-platform image
-    needs:
-      - prepare
-      - smoke
+    needs: [prepare, smoke]
     if: needs.prepare.outputs.publish == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     permissions:
       contents: read
       packages: write
+      id-token: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: core
+            image: ghcr.io/scu-maker-org/al1s
+          - target: workspace-runner
+            image: ghcr.io/scu-maker-org/al1s-workspace
     steps:
-      - name: Check out repository
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
-
-      - name: Log in to GHCR
-        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Generate image metadata
-        id: metadata
+      - id: metadata
         uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5
         with:
-          images: ghcr.io/scu-maker-org/al1s
+          images: ${{ matrix.image }}
           tags: |
             type=raw,value=${{ needs.prepare.outputs.version }}
-            type=raw,value=${{ needs.prepare.outputs.series }}
-            type=raw,value=latest,enable=${{ needs.prepare.outputs.publish_latest }}
-
-      - name: Build and publish image
+            type=raw,value=latest,enable=${{ github.event_name == 'release' && github.event.release.prerelease == false }}
+      - id: build
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
           context: .
+          file: deploy/Containerfile
+          target: ${{ matrix.target }}
           platforms: linux/amd64,linux/arm64
           push: true
-          tags: ${{ steps.metadata.outputs.tags }}
+          tags: ${{ matrix.image }}:candidate-${{ github.run_id }}-${{ github.run_attempt }}
           labels: ${{ steps.metadata.outputs.labels }}
           build-args: AL1S_VERSION=${{ needs.prepare.outputs.version }}
-          cache-from: |
-            type=gha,scope=smoke-amd64
-            type=gha,scope=smoke-arm64
-          cache-to: type=gha,mode=max,scope=publish-multiarch
           provenance: mode=max
           sbom: true
+      - name: Test candidate digest
+        env:
+          CANDIDATE: ${{ matrix.image }}:candidate-${{ github.run_id }}-${{ github.run_attempt }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          for platform in linux/amd64 linux/arm64; do
+            if [[ "$TARGET" == "core" ]]; then
+              docker run --rm --platform "$platform" --entrypoint al1s \
+                "$CANDIDATE@$DIGEST" \
+                --config /usr/share/al1s/config.example.toml db migrate
+            else
+              docker run --rm --platform "$platform" --entrypoint python \
+                "$CANDIDATE@$DIGEST" -c "import al1s.workspace.server"
+            fi
+          done
+      - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+      - name: Sign tested candidate digest
+        env:
+          CANDIDATE: ${{ matrix.image }}:candidate-${{ github.run_id }}-${{ github.run_attempt }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: cosign sign --yes "$CANDIDATE@$DIGEST"
+      - name: Promote tested digest
+        env:
+          CANDIDATE: ${{ matrix.image }}:candidate-${{ github.run_id }}-${{ github.run_attempt }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+          TAGS: ${{ steps.metadata.outputs.tags }}
+        run: |
+          set -euo pipefail
+          tag_args=()
+          while IFS= read -r tag; do
+            [[ -n "$tag" ]] && tag_args+=(--tag "$tag")
+          done <<< "$TAGS"
+          docker buildx imagetools create "${tag_args[@]}" "$CANDIDATE@$DIGEST"

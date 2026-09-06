@@ -2,10 +2,17 @@
 venv
 .venv
 __pycache__/
+.pytest_cache/
+.ruff_cache/
+.coverage
 .DS_Store
 .vscode
 logs/
 .env
+.secrets/
 # 配置文件
 config.toml
 data/
+*.db
+*.db-*
+health.json

@@ -1,68 +1,18 @@
-# Git相关
 .git
-.gitignore
-.gitattributes
-
-# Python缓存
+.github
+.venv
 __pycache__
-*.pyc
-*.pyo
-*.pyd
-.Python
-*.so
+*.py[cod]
 .pytest_cache
 .coverage
-
-# 虚拟环境
-.venv
-venv
-env
-
-# IDE文件
-.vscode
-.idea
-*.swp
-*.swo
-*~
-
-# 系统文件
-.DS_Store
-Thumbs.db
-
-# 日志文件
-*.log
-logs/
-
-# 配置文件（将通过挂载传入）
 .env
 .env.*
+.secrets
 config.toml
-config/.env
-src/config/roles.yaml
-
-# 运行时数据绝不能进入镜像构建上下文
-data/*
-!data/init_db.sql
+data
+logs
+tests
+docs
 *.db
 *.db-*
-*.sqlite
-*.sqlite3
-
-# 文档
-docs/
-
-# 测试文件
-test/
-tests/
-*_test.py
-test_*.py
-
-# Docker相关
-Dockerfile*
-docker-compose*.yml
-.dockerignore
-
-# 其他
-*.tmp
-*.temp
-.cache
+*.log
