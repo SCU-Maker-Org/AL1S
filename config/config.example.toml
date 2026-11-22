@@ -1,0 +1,48 @@
+config_version = 1
+
+[transports.telegram]
+enabled = true
+token_secret = "telegram_bot_token"
+
+[transports.discord]
+enabled = true
+token_secret = "discord_bot_token"
+message_content_intent = false
+
+[models.chat]
+base_url = "https://api.openai.com/v1"
+api_key_secret = "openai_api_key"
+model = "gpt-4o-mini"
+
+[storage]
+database_path = "yachiyo.db"
+
+[mcp]
+enabled = false
+
+[[mcp.servers]]
+name = "workspace"
+url = "http://yachiyo-workspace:8000/mcp"
+enabled = false
+bearer_secret = "workspace_mcp_token"
+allowed_tools = [
+  "workspace_create",
+  "workspace_list_files",
+  "workspace_read_file",
+  "workspace_write_file",
+  "workspace_replace_text",
+  "workspace_search",
+  "workspace_git",
+  "workspace_run_check",
+]
+trusted_read_only_tools = [
+  "workspace_list_files",
+  "workspace_read_file",
+  "workspace_search",
+]
+access = "private_admin"
+read_only = false
+timeout_seconds = 30
+max_result_bytes = 262144
+allow_insecure_http = true
+actor_scoped_workspace = true

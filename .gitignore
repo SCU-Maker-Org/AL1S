@@ -2,10 +2,16 @@
 venv
 .venv
 __pycache__/
+.ruff_cache/
 .DS_Store
 .vscode
 logs/
 .env
+.secrets/
 # 配置文件
 config.toml
 data/
+*.db
+*.db-*
+health.json
+/config/yachiyo.container.d/local.conf
