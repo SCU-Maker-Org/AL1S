@@ -1,0 +1,14 @@
+target-version = "py313"
+line-length = 100
+
+[lint]
+select = ["E", "F", "I", "UP", "B", "ASYNC", "S", "RUF"]
+ignore = ["S101", "RUF001"]
+
+[lint.per-file-ignores]
+"../src/yachiyo/config/models.py" = ["S105"]
+"../src/yachiyo/workspace/operations.py" = ["S108"]
+
+[format]
+quote-style = "double"
+indent-style = "space"

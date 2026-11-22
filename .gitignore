@@ -2,9 +2,7 @@
 venv
 .venv
 __pycache__/
-.pytest_cache/
 .ruff_cache/
-.coverage
 .DS_Store
 .vscode
 logs/
@@ -16,3 +14,4 @@ data/
 *.db
 *.db-*
 health.json
+/config/yachiyo.container.d/local.conf

@@ -1,0 +1,71 @@
+ARG PYTHON_IMAGE=docker.io/library/python:3.13.13-slim-bookworm@sha256:355bfa66770995d7e9a0da4b3473b44d0cb451f6b56f5615ad9c39e3c4eca03f
+ARG UV_IMAGE=ghcr.io/astral-sh/uv:0.11.19@sha256:b46b03ddfcfbf8f547af7e9eaefdf8a39c8cebcba7c98858d3162bd28cf536f6
+
+FROM ${UV_IMAGE} AS uv
+
+FROM ${PYTHON_IMAGE} AS builder
+COPY --from=uv /uv /usr/local/bin/uv
+WORKDIR /build
+ENV UV_PROJECT_ENVIRONMENT=/opt/venv \
+    UV_LINK_MODE=copy
+COPY pyproject.toml uv.lock README.md LICENSE ./
+
+FROM builder AS core-builder
+RUN uv sync --frozen --no-dev --extra proxy --no-install-project
+COPY src/ ./src/
+RUN uv sync --frozen --no-dev --extra proxy --no-editable
+
+FROM builder AS workspace-builder
+RUN uv sync --frozen --no-dev --extra workspace --no-install-project
+COPY src/ ./src/
+RUN uv sync --frozen --no-dev --extra workspace --no-editable
+
+FROM ${PYTHON_IMAGE} AS workspace-runner
+ARG YACHIYO_VERSION=2.0.0
+LABEL org.opencontainers.image.title="yachiyo Workspace" \
+      org.opencontainers.image.version="${YACHIYO_VERSION}" \
+      org.opencontainers.image.licenses="MIT"
+RUN set -eux; \
+    export DEBIAN_FRONTEND=noninteractive; \
+    apt-get -o Acquire::Retries=5 update; \
+    apt-get -o Acquire::Retries=5 install -y --no-install-recommends \
+        bubblewrap ca-certificates git; \
+    rm -rf /var/lib/apt/lists/*; \
+    mkdir -p /workspaces; \
+    chown -R 10001:10001 /workspaces
+COPY --from=workspace-builder /opt/venv /opt/venv
+ENV PATH=/opt/venv/bin:/usr/local/bin:/usr/bin:/bin \
+    HOME=/workspaces \
+    PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    MCP_HOST=0.0.0.0 \
+    MCP_PORT=8000 \
+    YACHIYO_CONTAINER=1 \
+    YACHIYO_CONFIG_FILE=/etc/yachiyo/config.toml \
+    YACHIYO_WORKSPACE_ROOT=/workspaces
+USER 10001:10001
+WORKDIR /workspaces
+EXPOSE 8000
+ENTRYPOINT ["yachiyo-workspace-server"]
+
+FROM ${PYTHON_IMAGE} AS core
+ARG YACHIYO_VERSION=2.0.0
+LABEL org.opencontainers.image.title="yachiyo" \
+      org.opencontainers.image.description="Lightweight Telegram and Discord AI assistant" \
+      org.opencontainers.image.version="${YACHIYO_VERSION}" \
+      org.opencontainers.image.licenses="MIT"
+COPY --from=core-builder /opt/venv /opt/venv
+COPY config/config.example.toml /usr/share/yachiyo/config.example.toml
+RUN mkdir -p /etc/yachiyo /var/lib/yachiyo /run/yachiyo /var/cache/yachiyo \
+    && chown -R 10001:10001 /var/lib/yachiyo /run/yachiyo /var/cache/yachiyo
+ENV PATH=/opt/venv/bin:/usr/local/bin:/usr/bin:/bin \
+    HOME=/var/lib/yachiyo \
+    YACHIYO_CONTAINER=1 \
+    YACHIYO_CONFIG_FILE=/etc/yachiyo/config.toml \
+    PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1
+USER 10001:10001
+WORKDIR /var/lib/yachiyo
+VOLUME ["/var/lib/yachiyo"]
+ENTRYPOINT ["yachiyo"]
+CMD ["run"]

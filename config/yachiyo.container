@@ -1,0 +1,33 @@
+[Unit]
+Description=yachiyo chat assistant
+
+[Container]
+Image=localhost/yachiyo:2.0.0
+Pull=never
+ContainerName=yachiyo
+UserNS=keep-id:uid=10001,gid=10001
+User=10001
+Group=10001
+Volume=./config.toml:/etc/yachiyo/config.toml:ro,z
+Volume=./.secrets:/run/secrets:ro,Z
+Volume=%h/.local/share/yachiyo:/var/lib/yachiyo:Z
+ReadOnly=true
+DropCapability=all
+NoNewPrivileges=true
+Memory=512m
+PidsLimit=256
+StopTimeout=360
+HealthCmd=yachiyo status
+HealthInterval=30s
+HealthTimeout=10s
+HealthStartPeriod=40s
+HealthRetries=3
+
+[Service]
+ExecStartPre=/usr/bin/mkdir -p -m 0700 %h/.local/share/yachiyo
+Restart=on-failure
+RestartSec=5s
+TimeoutStopSec=390s
+
+[Install]
+WantedBy=default.target

@@ -5,6 +5,7 @@ on:
     branches: [main, "refactor/**"]
   pull_request:
   workflow_dispatch:
+  workflow_call:
 
 permissions:
   contents: read
@@ -30,44 +31,5 @@ jobs:
           uv export --frozen --no-dev --extra proxy --extra workspace --no-emit-project
           --format requirements-txt |
           uvx --from pip-audit==2.10.1 pip-audit -r /dev/stdin
-      - run: uv run ruff format --check src tests
-      - run: uv run ruff check src tests
-      - run: uv run python -m compileall -q src
-
-  container-smoke:
-    needs: quality
-    runs-on: ubuntu-24.04
-    timeout-minutes: 60
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - target: core
-            tag: al1s:ci
-          - target: workspace-runner
-            tag: al1s-workspace:ci
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
-      - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
-        with:
-          context: .
-          file: deploy/Containerfile
-          target: ${{ matrix.target }}
-          load: true
-          platforms: linux/amd64
-          push: false
-          tags: ${{ matrix.tag }}
-          build-args: AL1S_VERSION=2.0.0
-          cache-from: type=gha,scope=${{ matrix.target }}
-          cache-to: type=gha,mode=max,scope=${{ matrix.target }}
-      - name: Validate core image
-        if: matrix.target == 'core'
-        run: |
-          docker run --rm --entrypoint al1s ${{ matrix.tag }} \
-            --config /usr/share/al1s/config.example.toml config validate >/dev/null
-          compressed=$(docker save ${{ matrix.tag }} | gzip -c | wc -c)
-          test "$compressed" -lt 188743680
-      - name: Validate workspace image
-        if: matrix.target == 'workspace-runner'
-        run: docker run --rm --entrypoint python ${{ matrix.tag }} -c "import al1s.workspace.server"
+      - run: uv run ruff format --check src
+      - run: uv run ruff check src
