@@ -26,6 +26,14 @@ class ModelProviderError(RuntimeError):
     pass
 
 
+def _tool_arguments(raw: str) -> dict[str, Any]:
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        return {"_invalid_json": raw}
+    return parsed if isinstance(parsed, dict) else {"value": parsed}
+
+
 @dataclass(slots=True)
 class _ConfiguredClient:
     settings: ModelEndpointSettings
@@ -118,19 +126,15 @@ class OpenAICompatibleModel:
         response = await configured.client.chat.completions.create(**arguments)
         choice = response.choices[0]
         message = choice.message
-        calls: list[ToolCall] = []
-        for call in message.tool_calls or ():
-            try:
-                arguments = json.loads(call.function.arguments or "{}")
-            except json.JSONDecodeError:
-                arguments = {"_invalid_json": call.function.arguments}
-            if not isinstance(arguments, dict):
-                arguments = {"value": arguments}
-            calls.append(ToolCall(id=call.id, name=call.function.name, arguments=arguments))
         usage = response.usage
         return ModelResult(
             text=message.content or "",
-            tool_calls=tuple(calls),
+            tool_calls=tuple(
+                ToolCall(
+                    call.id, call.function.name, _tool_arguments(call.function.arguments or "{}")
+                )
+                for call in message.tool_calls or ()
+            ),
             usage=ModelUsage(
                 input_tokens=int(usage.prompt_tokens) if usage else 0,
                 output_tokens=int(usage.completion_tokens) if usage else 0,
@@ -198,16 +202,11 @@ class OpenAICompatibleModel:
         for item in response.output:
             if getattr(item, "type", None) != "function_call":
                 continue
-            raw_arguments = getattr(item, "arguments", "{}")
-            try:
-                arguments = json.loads(raw_arguments)
-            except json.JSONDecodeError:
-                arguments = {"_invalid_json": raw_arguments}
             calls.append(
                 ToolCall(
                     id=getattr(item, "call_id", getattr(item, "id", "")),
                     name=getattr(item, "name", ""),
-                    arguments=arguments if isinstance(arguments, dict) else {"value": arguments},
+                    arguments=_tool_arguments(getattr(item, "arguments", "{}")),
                 )
             )
         usage = response.usage

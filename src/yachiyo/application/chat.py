@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from contextvars import ContextVar
 from dataclasses import replace
 from datetime import UTC, datetime
 
@@ -25,10 +24,12 @@ from yachiyo.ports.search import ReverseImageSearch
 
 from .agent import AgentRunner
 from .commands import CommandBus, CommandContext
-from .group_policy import GroupContextBuffer, GroupPolicy
+from .group_policy import GroupContextBuffer, GroupDecision, GroupPolicy
 from .locks import SessionBusyError, SessionLockPool
 from .profiles import ProfileService
 from .rate_limit import RateLimiter
+
+type _TurnResult = tuple[ResponsePlan | None, ChatCompletion | None]
 
 
 class ChatApplication:
@@ -56,12 +57,6 @@ class ChatApplication:
         self.group_policy = GroupPolicy(database, settings)
         self.group_context = GroupContextBuffer(settings)
         self._attachment_slots = asyncio.Semaphore(2)
-        self._processing_tokens: ContextVar[dict[tuple[str, str, str], str] | None] = ContextVar(
-            "event_processing_tokens", default=None
-        )
-        self._chat_completions: ContextVar[dict[tuple[str, str, str], ChatCompletion] | None] = (
-            ContextVar("event_chat_completions", default=None)
-        )
         self.logger = logging.getLogger(__name__)
 
     async def handle(self, event: InboundEvent) -> ResponsePlan | None:
@@ -76,24 +71,19 @@ class ChatApplication:
                 messages=(OutboundMessage(text="该请求正在处理中，请稍后重试。"),),
                 track_delivery=False,
             )
-        processing_tokens = dict(self._processing_tokens.get() or {})
-        processing_tokens[event.idempotency_key] = processing_token
-        self._processing_tokens.set(processing_tokens)
-        return await self._handle_with_lease(event, processing_token)
 
-    async def _handle_with_lease(
-        self, event: InboundEvent, processing_token: str
-    ) -> ResponsePlan | None:
         stop_renewal = asyncio.Event()
         renewal = asyncio.create_task(
             self._renew_lease(event, processing_token, stop_renewal),
             name=f"event-lease:{event.event_id}",
         )
         try:
-            response = await self._handle_claimed(event)
-            if response is None or not response.track_delivery:
+            response, completion = await self._handle_claimed(event)
+            if response is None:
+                await self.database.discard_event(*event.idempotency_key, processing_token)
+                return None
+            if not response.track_delivery:
                 return response
-            completion = (self._chat_completions.get() or {}).get(event.idempotency_key)
             await self.database.complete_event(
                 event,
                 response,
@@ -107,8 +97,6 @@ class ChatApplication:
         finally:
             stop_renewal.set()
             await renewal
-            self._forget_processing_token(event)
-            self._forget_chat_completion(event)
 
     async def _renew_lease(
         self,
@@ -136,7 +124,7 @@ class ChatApplication:
                     self.logger.warning("event processing lease was lost")
                     return
 
-    async def _handle_claimed(self, event: InboundEvent) -> ResponsePlan | None:
+    async def _handle_claimed(self, event: InboundEvent) -> _TurnResult:
         identity_id = await self.database.ensure_identity(event.actor)
         chat_row_id = await self.database.ensure_chat(event.address)
         try:
@@ -149,13 +137,13 @@ class ChatApplication:
             async with self.locks.hold(policy_key):
                 return await self._handle_policy(event, identity_id, chat_row_id)
         except SessionBusyError:
-            return ResponsePlan.text("当前会话正在处理其他请求，请稍后重试。")
+            return ResponsePlan.text("当前会话正在处理其他请求，请稍后重试。"), None
         except ValueError as exc:
-            return ResponsePlan.text(str(exc))
+            return ResponsePlan.text(str(exc)), None
 
     async def _handle_policy(
         self, event: InboundEvent, identity_id: int, chat_row_id: int
-    ) -> ResponsePlan | None:
+    ) -> _TurnResult:
         decision = await self.group_policy.decide(event, chat_row_id)
         if not decision.allowed:
             if (
@@ -163,56 +151,48 @@ class ChatApplication:
                 and self.settings.policies.group.observe_unmentioned_messages
             ):
                 await self.group_context.observe(event)
-            response = (
-                ResponsePlan.text("当前群聊未启用 yachiyo。")
-                if event.command is not None and decision.reason == "group_disabled"
-                else None
-            )
-            if response is None:
-                await self._discard_event(event)
-            return response
+            if event.command is not None and decision.reason == "group_disabled":
+                return ResponsePlan.text("当前群聊未启用 yachiyo。"), None
+            return None, None
 
         rate = await self.rate_limiter.check(event)
         if not rate.allowed:
             if not rate.notify:
-                await self._discard_event(event)
-                return None
-            return ResponsePlan.text(f"请求过于频繁，请在 {rate.retry_after:.1f} 秒后重试。")
+                return None, None
+            return ResponsePlan.text(f"请求过于频繁，请在 {rate.retry_after:.1f} 秒后重试。"), None
 
         command_rejection = self.commands.preflight(event)
         if command_rejection is not None:
-            return command_rejection
+            return command_rejection, None
 
         async with self.locks.hold(decision.session.stable_id):
-            return await self._handle_locked(event, decision, identity_id, chat_row_id)
+            return await self._handle_locked(event, decision, identity_id)
 
     async def _handle_locked(
-        self, event, decision, identity_id: int, chat_row_id: int
-    ) -> ResponsePlan | None:
+        self, event: InboundEvent, decision: GroupDecision, identity_id: int
+    ) -> _TurnResult:
         if event.attachment_loader is not None:
             async with self._attachment_slots:
                 attachments = await event.attachment_loader()
                 event = replace(event, attachments=attachments, attachment_loader=None)
-                return await self._handle_loaded(event, decision, identity_id, chat_row_id)
-        return await self._handle_loaded(event, decision, identity_id, chat_row_id)
+                return await self._handle_loaded(event, decision, identity_id)
+        return await self._handle_loaded(event, decision, identity_id)
 
     async def _handle_loaded(
-        self, event, decision, identity_id: int, chat_row_id: int
-    ) -> ResponsePlan | None:
+        self, event: InboundEvent, decision: GroupDecision, identity_id: int
+    ) -> _TurnResult:
         conversation = await self.database.ensure_conversation(
             decision.session, self.settings.default_role
         )
         if event.command is not None:
-            return await self.commands.execute(
-                CommandContext(event, decision.session, identity_id, chat_row_id)
-            )
+            context = CommandContext(event, decision.session, identity_id, decision.chat_row_id)
+            return await self.commands.execute(context), None
 
         prompt = event.text.strip()
         if not prompt and event.attachments:
             prompt = "请分析随消息发送的附件。"
         if not prompt:
-            await self._discard_event(event)
-            return None
+            return None, None
         history = await self.database.recent_messages(
             decision.session, self.settings.policies.max_history_messages
         )
@@ -224,7 +204,7 @@ class ChatApplication:
             if event.address.kind is ChatKind.PRIVATE and self.settings.profile.enabled
             else ""
         )
-        retrieved = ""
+        references = []
         if self.settings.rag.enabled:
             hits = await self.knowledge.search(
                 prompt,
@@ -232,14 +212,10 @@ class ChatApplication:
                 limit=self.settings.rag.top_k,
                 include_memories=(self.settings.memory.enabled and decision.memory_enabled),
             )
-            retrieved = "\n\n".join(f"[{hit.source}:{hit.entry_id}] {hit.content}" for hit in hits)
+            references.extend(f"[{hit.source}:{hit.entry_id}] {hit.content}" for hit in hits)
         buffered = await self.group_context.context(event)
         if buffered:
-            retrieved = (
-                f"{retrieved}\n\nRecent group context (untrusted):\n{buffered}"
-                if retrieved
-                else f"Recent group context (untrusted):\n{buffered}"
-            )
+            references.append(f"Recent group context (untrusted):\n{buffered}")
         try:
             async with asyncio.timeout(self.settings.policies.request_timeout_seconds):
                 result = await self.agent.run(
@@ -251,26 +227,23 @@ class ChatApplication:
                     conversation_id=decision.session.stable_id,
                     actor_key=event.actor.identity.key,
                     profile_context=profile_context,
-                    retrieved_context=retrieved,
+                    retrieved_context="\n\n".join(references),
                 )
         except TimeoutError:
-            self._set_chat_completion(
-                event,
-                ChatCompletion(
-                    session=decision.session,
-                    user_message=StoredMessage(MessageRole.USER, prompt, event.timestamp),
-                    assistant_message=StoredMessage(
-                        MessageRole.ASSISTANT,
-                        "request timed out",
-                        datetime.now(UTC),
-                        status="failed",
-                    ),
-                    identity_id=identity_id,
-                    input_tokens=0,
-                    output_tokens=0,
+            completion = ChatCompletion(
+                session=decision.session,
+                user_message=StoredMessage(MessageRole.USER, prompt, event.timestamp),
+                assistant_message=StoredMessage(
+                    MessageRole.ASSISTANT,
+                    "request timed out",
+                    datetime.now(UTC),
+                    status="failed",
                 ),
+                identity_id=identity_id,
+                input_tokens=0,
+                output_tokens=0,
             )
-            return ResponsePlan.text("请求超时，请缩短问题或稍后重试。")
+            return ResponsePlan.text("请求超时，请缩短问题或稍后重试。"), completion
 
         display_text = result.text
         image = next(
@@ -301,40 +274,31 @@ class ChatApplication:
             if event.address.kind is ChatKind.PRIVATE
             else (decision.memory_enabled and self.settings.memory.group_auto_learning)
         )
-        self._set_chat_completion(
-            event,
-            ChatCompletion(
-                session=decision.session,
-                user_message=StoredMessage(MessageRole.USER, prompt, event.timestamp),
-                assistant_message=StoredMessage(
-                    MessageRole.ASSISTANT,
-                    display_text,
-                    datetime.now(UTC),
-                    run_id=result.run_id,
-                    model=result.model,
-                ),
-                identity_id=identity_id,
-                input_tokens=result.usage.input_tokens,
-                output_tokens=result.usage.output_tokens,
-                memory_scope=decision.session.knowledge_scope if memory_enabled else None,
-                memory_payload=(
-                    {
-                        "scope": decision.session.knowledge_scope,
-                        "user_text": prompt,
-                        "assistant_text": display_text,
-                        **(
-                            {
-                                "group_chat_id": str(chat_row_id),
-                                "group_consent_at": decision.memory_consent_at or "",
-                            }
-                            if event.address.kind is not ChatKind.PRIVATE
-                            else {}
-                        ),
-                    }
-                    if memory_enabled
-                    else None
-                ),
+        memory_payload = None
+        if memory_enabled:
+            memory_payload = {
+                "scope": decision.session.knowledge_scope,
+                "user_text": prompt,
+                "assistant_text": display_text,
+            }
+            if event.address.kind is not ChatKind.PRIVATE:
+                memory_payload["group_chat_id"] = str(decision.chat_row_id)
+                memory_payload["group_consent_at"] = decision.memory_consent_at or ""
+        completion = ChatCompletion(
+            session=decision.session,
+            user_message=StoredMessage(MessageRole.USER, prompt, event.timestamp),
+            assistant_message=StoredMessage(
+                MessageRole.ASSISTANT,
+                display_text,
+                datetime.now(UTC),
+                run_id=result.run_id,
+                model=result.model,
             ),
+            identity_id=identity_id,
+            input_tokens=result.usage.input_tokens,
+            output_tokens=result.usage.output_tokens,
+            memory_scope=decision.session.knowledge_scope if memory_enabled else None,
+            memory_payload=memory_payload,
         )
         messages = [
             OutboundMessage(
@@ -350,29 +314,7 @@ class ChatApplication:
                     private=True,
                 )
             )
-        return ResponsePlan(messages=tuple(messages))
-
-    async def _discard_event(self, event: InboundEvent) -> None:
-        processing_token = (self._processing_tokens.get() or {}).get(event.idempotency_key)
-        if processing_token is None:
-            raise RuntimeError("event has no processing lease")
-        await self.database.discard_event(*event.idempotency_key, processing_token)
-        self._forget_processing_token(event)
-
-    def _forget_processing_token(self, event: InboundEvent) -> None:
-        processing_tokens = dict(self._processing_tokens.get() or {})
-        processing_tokens.pop(event.idempotency_key, None)
-        self._processing_tokens.set(processing_tokens)
-
-    def _set_chat_completion(self, event: InboundEvent, completion: ChatCompletion) -> None:
-        completions = dict(self._chat_completions.get() or {})
-        completions[event.idempotency_key] = completion
-        self._chat_completions.set(completions)
-
-    def _forget_chat_completion(self, event: InboundEvent) -> None:
-        completions = dict(self._chat_completions.get() or {})
-        completions.pop(event.idempotency_key, None)
-        self._chat_completions.set(completions)
+        return ResponsePlan(messages=tuple(messages)), completion
 
     async def pending_responses(
         self, transport: str, bot_id: str

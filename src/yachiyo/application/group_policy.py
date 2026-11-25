@@ -134,37 +134,16 @@ class GroupPolicy:
             return GroupDecision(False, session, chat_row_id, memory_enabled, "thread_not_allowed")
         if not enabled and not management:
             return GroupDecision(False, session, chat_row_id, memory_enabled, "group_disabled")
-        if event.command is not None:
-            return GroupDecision(
-                True,
-                session,
-                chat_row_id,
-                memory_enabled,
-                memory_consent_at=consent_at,
-            )
-        if event.mentions_bot or (configured.allow_reply_trigger and event.replies_to_bot):
-            return GroupDecision(
-                True,
-                session,
-                chat_row_id,
-                memory_enabled,
-                memory_consent_at=consent_at,
-            )
         folded = event.text.casefold()
-        if any(word.casefold() in folded for word in wake_words):
-            return GroupDecision(
-                True,
-                session,
-                chat_row_id,
-                memory_enabled,
-                memory_consent_at=consent_at,
-            )
-        if not configured.require_mention:
-            return GroupDecision(
-                True,
-                session,
-                chat_row_id,
-                memory_enabled,
-                memory_consent_at=consent_at,
-            )
-        return GroupDecision(False, session, chat_row_id, memory_enabled, "not_triggered")
+        triggered = (
+            event.command is not None
+            or event.mentions_bot
+            or (configured.allow_reply_trigger and event.replies_to_bot)
+            or not configured.require_mention
+            or any(word.casefold() in folded for word in wake_words)
+        )
+        if not triggered:
+            return GroupDecision(False, session, chat_row_id, memory_enabled, "not_triggered")
+        return GroupDecision(
+            True, session, chat_row_id, memory_enabled, memory_consent_at=consent_at
+        )

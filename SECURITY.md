@@ -5,7 +5,9 @@ or container environment dumps. The user Quadlet mounts owner-only credential fi
 Podman-managed secrets can also be mounted there.
 
 Treat every MCP server as executable authority. Configure only reviewed endpoints,
-allowlist tools, prefer `read_only=true`, and require application approval for writes.
+allowlist tools and prefer `read_only=true`. Write confirmation is enabled by
+default. Setting `confirm_writes=false` authorizes direct execution of the
+server's allowlisted tools for everyone covered by its `access` setting.
 Never mount the Podman socket into the yachiyo core or workspace container.
 
 Group observation and learning are disabled by default. Administrators must explicitly

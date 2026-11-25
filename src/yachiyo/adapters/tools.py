@@ -34,7 +34,7 @@ class MediaToolRegistry:
                 "builtin",
                 "media_generate_image",
                 AccessLevel.PRIVATE_ADMIN,
-                True,
+                requires_approval=False,
             ),
             "media_synthesize_speech": RegisteredTool(
                 ToolDefinition(
@@ -55,7 +55,7 @@ class MediaToolRegistry:
                 "builtin",
                 "media_synthesize_speech",
                 AccessLevel.PRIVATE_ADMIN,
-                True,
+                requires_approval=False,
             ),
         }
 

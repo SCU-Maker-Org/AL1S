@@ -1,0 +1,52 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<opml version="2.0">
+  <head>
+    <title>Frontier AI 一线研究与工程订阅</title>
+    <dateCreated>Tue, 01 Sep 2026 00:00:00 GMT</dateCreated>
+    <dateModified>Sun, 22 Nov 2026 12:00:00 GMT</dateModified>
+  </head>
+  <body>
+    <outline text="01 国内原生博客（稳定）" title="01 国内原生博客（稳定）">
+      <outline type="rss" text="科学空间 · 苏剑林" title="科学空间 · 苏剑林" htmlUrl="https://spaces.ac.cn/" xmlUrl="https://spaces.ac.cn/feed/" />
+      <outline type="rss" text="Yuxin Wu · Moonshot" title="Yuxin Wu · Moonshot" htmlUrl="https://ppwwyyxx.com/blog/archives/" xmlUrl="https://ppwwyyxx.com/blog/atom.xml" />
+      <outline type="rss" text="Yuxuan Tong · ByteDance Seed" title="Yuxuan Tong · ByteDance Seed" htmlUrl="https://tongyx361.github.io/blogs/" xmlUrl="https://tongyx361.github.io/blogs/index.xml" />
+      <outline type="rss" text="KVCache.AI · Mooncake" title="KVCache.AI · Mooncake" htmlUrl="https://kvcache.ai/blog/" xmlUrl="https://kvcache.ai/blog/index.xml" />
+      <outline type="rss" text="Zhihong Shao · DeepSeek" title="Zhihong Shao · DeepSeek" htmlUrl="https://zhihongshao.github.io/" xmlUrl="https://zhihongshao.github.io/feed.xml" />
+      <outline type="rss" text="Xunhao Lai · MiniMax" title="Xunhao Lai · MiniMax" htmlUrl="https://xunhaolai.github.io/" xmlUrl="https://xunhaolai.github.io/feed.xml" />
+      <outline type="rss" text="Atum · MiniMax" title="Atum · MiniMax" htmlUrl="https://atum.li/en/" xmlUrl="https://atum.li/rss-en.xml" />
+      <outline type="rss" text="Chengxing Xie · GLM/Z.ai" title="Chengxing Xie · GLM/Z.ai" htmlUrl="https://yitianlian.github.io/year-archive/" xmlUrl="https://yitianlian.github.io/feed.xml" />
+      <outline type="rss" text="Zhonglin Xie · ByteDance Seed" title="Zhonglin Xie · ByteDance Seed" htmlUrl="https://zhonglinxie.github.io/" xmlUrl="https://zhonglinxie.github.io/feed.xml" />
+    </outline>
+    <outline text="02 国外原生博客（稳定）" title="02 国外原生博客（稳定）">
+      <outline type="rss" text="Lilian Weng · Lil'Log" title="Lilian Weng · Lil'Log" htmlUrl="https://lilianweng.github.io/" xmlUrl="https://lilianweng.github.io/index.xml" />
+      <outline type="rss" text="Brendan Gregg · Systems Performance" title="Brendan Gregg · Systems Performance" htmlUrl="https://www.brendangregg.com/blog/" xmlUrl="https://www.brendangregg.com/blog/rss.xml" />
+      <outline type="rss" text="Boaz Barak · Windows on Theory" title="Boaz Barak · Windows on Theory" htmlUrl="https://windowsontheory.org/" xmlUrl="https://windowsontheory.org/feed/" />
+      <outline type="rss" text="OpenAI · Alignment Research" title="OpenAI · Alignment Research" htmlUrl="https://alignment.openai.com/" xmlUrl="https://alignment.openai.com/rss.xml" />
+      <outline type="rss" text="Nicholas Carlini · Writing" title="Nicholas Carlini · Writing" htmlUrl="https://nicholas.carlini.com/writing" xmlUrl="https://nicholas.carlini.com/writing/feed.xml" />
+      <outline type="rss" text="Den Delimarsky · Writing" title="Den Delimarsky · Writing" htmlUrl="https://den.dev/blog/" xmlUrl="https://den.dev/blog/index.xml" />
+      <outline type="rss" text="Andrej Karpathy · Blog" title="Andrej Karpathy · Blog" htmlUrl="https://karpathy.github.io/" xmlUrl="https://karpathy.github.io/feed.xml" />
+      <outline type="rss" text="Andy Jones · RL and Infrastructure" title="Andy Jones · RL and Infrastructure" htmlUrl="https://andyljones.com/" xmlUrl="https://andyljones.com/rss.xml" />
+      <outline type="rss" text="Jan Leike · Alignment Musings" title="Jan Leike · Alignment Musings" htmlUrl="https://aligned.substack.com/" xmlUrl="https://aligned.substack.com/feed" />
+      <outline type="rss" text="Transformer Circuits Thread" title="Transformer Circuits Thread" htmlUrl="https://transformer-circuits.pub/" xmlUrl="https://transformer-circuits.pub/feed.xml" />
+      <outline type="rss" text="Sander Dieleman · Generative Models" title="Sander Dieleman · Generative Models" htmlUrl="https://sander.ai/" xmlUrl="https://sander.ai/feed.xml" />
+      <outline type="rss" text="Alex Irpan · Sorta Insightful" title="Alex Irpan · Sorta Insightful" htmlUrl="https://www.alexirpan.com/" xmlUrl="https://www.alexirpan.com/feed.xml" />
+      <outline type="rss" text="Yi Tay · Blog" title="Yi Tay · Blog" htmlUrl="https://www.yitay.net/" xmlUrl="https://www.yitay.net/blog?format=rss" />
+      <outline type="rss" text="Fabian Pedregosa · Keep the Gradient Flowing" title="Fabian Pedregosa · Keep the Gradient Flowing" htmlUrl="https://fa.bianp.net/" xmlUrl="https://fa.bianp.net/blog/feed/rss.xml" />
+      <outline type="rss" text="Utku Evci · Blog" title="Utku Evci · Blog" htmlUrl="https://www.utkuevci.com/" xmlUrl="https://evcu.github.io/feed.xml" />
+      <outline type="rss" text="Elie Bursztein · AI and Cybersecurity" title="Elie Bursztein · AI and Cybersecurity" htmlUrl="https://elie.net/blog" xmlUrl="https://feeds.feedburner.com/inftoint" />
+      <outline type="rss" text="John Langford · Machine Learning Theory" title="John Langford · Machine Learning Theory" htmlUrl="https://hunch.net/" xmlUrl="https://hunch.net/?feed=rss2" />
+      <outline type="rss" text="Microsoft Research Blog" title="Microsoft Research Blog" htmlUrl="https://www.microsoft.com/en-us/research/blog/" xmlUrl="https://www.microsoft.com/en-us/research/feed/" />
+      <outline type="rss" text="AKS Engineering Blog" title="AKS Engineering Blog" htmlUrl="https://blog.aks.azure.com/" xmlUrl="https://blog.aks.azure.com/rss.xml" />
+    </outline>
+    <outline text="03 推理与扩散社区博客（已核对）" title="03 推理与扩散社区博客（已核对）">
+      <outline type="rss" text="vLLM Blog" title="vLLM Blog" htmlUrl="https://vllm.ai/blog" xmlUrl="https://vllm.ai/blog/rss.xml" />
+      <outline type="rss" text="PyTorch Blog" title="PyTorch Blog" htmlUrl="https://pytorch.org/blog/" xmlUrl="https://pytorch.org/blog/feed/" />
+      <outline type="rss" text="Hugging Face Blog" title="Hugging Face Blog" htmlUrl="https://huggingface.co/blog" xmlUrl="https://huggingface.co/blog/feed.xml" />
+      <outline type="rss" text="NVIDIA Technical Blog" title="NVIDIA Technical Blog" htmlUrl="https://developer.nvidia.com/blog/" xmlUrl="https://developer.nvidia.com/blog/feed" />
+      <outline type="rss" text="Modal Blog" title="Modal Blog" htmlUrl="https://modal.com/blog" xmlUrl="https://modal.com/blog/atom.xml" />
+      <outline type="rss" text="FlashInfer Blog" title="FlashInfer Blog" htmlUrl="https://flashinfer.ai/" xmlUrl="https://flashinfer.ai/feed.xml" />
+      <outline type="rss" text="DeepSpeed" title="DeepSpeed" htmlUrl="https://www.deepspeed.ai/" xmlUrl="https://www.deepspeed.ai/feed.xml" />
+      <outline type="rss" text="AMD ROCm Blogs" title="AMD ROCm Blogs" htmlUrl="https://rocm.blogs.amd.com/" xmlUrl="https://rocm.blogs.amd.com/blog/atom.xml" />
+    </outline>
+  </body>
+</opml>

@@ -1,0 +1,26 @@
+[Unit]
+Description=RSS MCP for Yachiyo
+
+[Quadlet]
+DefaultDependencies=false
+
+[Container]
+Image=localhost/yachiyo-rss-mcp:ab7f2ad
+Pull=never
+ContainerName=yachiyo-rss
+UserNS=keep-id:uid=10001,gid=10001
+User=10001
+Group=10001
+PublishPort=127.0.0.1:8769:8000
+Volume=%h/.local/share/yachiyo-rss:/data:Z
+Secret=yachiyo-rss-token,type=env,target=RSS_MCP_AUTH_TOKEN
+Environment=RSS_MCP_REFRESH_INTERVAL=1800
+DropCapability=all
+NoNewPrivileges=true
+
+[Service]
+ExecStartPre=/usr/bin/mkdir -p -m 0700 %h/.local/share/yachiyo-rss
+Restart=on-failure
+
+[Install]
+WantedBy=default.target

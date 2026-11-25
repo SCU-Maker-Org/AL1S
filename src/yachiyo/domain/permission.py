@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from enum import IntEnum, StrEnum
+from enum import StrEnum
 
 
 class AccessLevel(StrEnum):
@@ -11,13 +11,6 @@ class AccessLevel(StrEnum):
     PRIVATE = "private"
     ADMIN = "admin"
     PRIVATE_ADMIN = "private_admin"
-
-
-class _AccessRank(IntEnum):
-    PUBLIC = 0
-    PRIVATE = 1
-    ADMIN = 2
-    PRIVATE_ADMIN = 3
 
 
 @dataclass(frozen=True, slots=True)
@@ -33,13 +26,3 @@ class RequestPermission:
         if level is AccessLevel.ADMIN:
             return self.is_admin
         return self.is_private and self.is_admin
-
-    @property
-    def rank(self) -> _AccessRank:
-        if self.is_private and self.is_admin:
-            return _AccessRank.PRIVATE_ADMIN
-        if self.is_admin:
-            return _AccessRank.ADMIN
-        if self.is_private:
-            return _AccessRank.PRIVATE
-        return _AccessRank.PUBLIC

@@ -335,11 +335,7 @@ class TelegramTransport:
                 else None
             )
             target = int(event.address.chat_id)
-            thread_id = (
-                int(event.address.thread_id)
-                if target == int(event.address.chat_id) and event.address.thread_id != "0"
-                else None
-            )
+            thread_id = int(event.address.thread_id) if event.address.thread_id != "0" else None
             text_chunks = split_text(message.text, 4096)
             markup = self._markup(message.buttons)
             for index, chunk in enumerate(text_chunks):

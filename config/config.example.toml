@@ -46,3 +46,30 @@ timeout_seconds = 30
 max_result_bytes = 262144
 allow_insecure_http = true
 actor_scoped_workspace = true
+
+[[mcp.servers]]
+name = "rss"
+url = "http://169.254.1.1:8769/mcp"
+enabled = false
+bearer_secret = "rss_mcp_token"
+allowed_tools = [
+  "add_subscription",
+  "update_subscription",
+  "remove_subscription",
+  "list_subscriptions",
+  "server_status",
+  "fetch_feed",
+  "list_entries",
+  "read_entry",
+  "search_entries",
+  "get_digest",
+  "mark_entry",
+  "star_entry",
+  "import_opml",
+  "export_opml",
+  "discover_feed",
+]
+read_only = false
+access = "public"
+confirm_writes = false
+allow_insecure_http = true

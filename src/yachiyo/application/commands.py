@@ -117,10 +117,9 @@ class CommandBus:
         spec = _COMMAND_MAP.get(invocation.name)
         if spec is None:
             return ResponsePlan.text(f"未知命令：/{invocation.name}")
-        if spec.private_only and context.event.address.kind is not ChatKind.PRIVATE:
-            return ResponsePlan.text("该命令只能在私聊中使用。")
-        if spec.admin_only and not context.event.permission.is_admin:
-            return ResponsePlan.text("该命令需要管理员权限。")
+        rejection = self.preflight(context.event)
+        if rejection is not None:
+            return rejection
         handler = getattr(self, f"_cmd_{spec.name}")
         return await handler(context, invocation.arguments.strip())
 
