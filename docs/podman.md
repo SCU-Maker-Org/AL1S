@@ -69,3 +69,50 @@ give it a writable `/workspaces` directory, and mount only `workspace_mcp_token`
 under `/run/secrets` with mode `0400` for UID 10001. The Podman socket stays on the
 host. Enable the `workspace` entry in the core's MCP settings and configure an
 administrator before using its private admin tools.
+
+## Optional RSS server
+
+The [rss-mcp](https://github.com/huangcheng/rss-mcp) sidecar stores subscriptions,
+entries and digest delivery state in `~/.local/share/yachiyo-rss/rss.db`. Build the
+revision used by the RSS Quadlet from the checkout root.
+
+```sh
+git clone https://github.com/huangcheng/rss-mcp.git /tmp/yachiyo-rss-upstream
+git -C /tmp/yachiyo-rss-upstream checkout --detach ab7f2ad110537027baa48e943729d2345491e020
+podman build -t localhost/yachiyo-rss-mcp:ab7f2ad /tmp/yachiyo-rss-upstream
+```
+
+Create the shared token once and register its value as a Podman secret.
+
+```sh
+(umask 077; set -C; openssl rand -hex 32 > config/.secrets/rss_mcp_token)
+tr -d '\r\n' < config/.secrets/rss_mcp_token | podman secret create yachiyo-rss-token -
+quadlets="${XDG_CONFIG_HOME:-$HOME/.config}/containers/systemd"
+mkdir -p "$quadlets"
+ln -sT "$PWD/config/rss/yachiyo-rss.container" "$quadlets/yachiyo-rss.container"
+systemctl --user daemon-reload
+systemctl --user start yachiyo-rss.service
+```
+
+Enable the loopback mapping in the core Quadlet using
+`Network=pasta:--map-host-loopback,169.254.1.1` in its local drop-in. The RSS port
+is published only on host loopback. If outbound feeds need the host proxy,
+add the same pasta mapping and proxy environment settings to a local
+`yachiyo-rss.container.d/local.conf` next to the installed RSS Quadlet. Copy the example RSS server entry to the
+active TOML, enable both the MCP section and the RSS entry, then run the following
+from a checkout with Yachiyo installed in its local Python environment.
+
+```sh
+.venv/bin/python config/rss/import_feeds.py
+podman build --target core -f config/Containerfile -t localhost/yachiyo:2.0.0 .
+systemctl --user daemon-reload
+systemctl --user restart yachiyo.service
+podman exec yachiyo yachiyo mcp check
+```
+
+The import preserves the three OPML folders as tags and skips existing URLs.
+The sidecar refreshes feeds every 30 minutes. The public RSS entry lists all
+15 tools from the pinned server. Anyone chatting with Yachiyo in a DM or group
+can use them directly, including adding or removing feeds, importing or exporting
+OPML, and marking articles read or starred. These changes affect the shared RSS
+library. `get_digest` skips entries already delivered to any chat by default.

@@ -23,7 +23,7 @@ class RegisteredTool:
     server: str
     original_name: str
     access: AccessLevel
-    read_only: bool
+    requires_approval: bool
 
 
 @dataclass(frozen=True, slots=True)

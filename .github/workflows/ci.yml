@@ -31,5 +31,6 @@ jobs:
           uv export --frozen --no-dev --extra proxy --extra workspace --no-emit-project
           --format requirements-txt |
           uvx --from pip-audit==2.10.1 pip-audit -r /dev/stdin
-      - run: uv run ruff format --check src
-      - run: uv run ruff check src
+      - run: uv run ruff format --check src tests
+      - run: uv run ruff check src tests
+      - run: uv run python -m unittest discover -s tests

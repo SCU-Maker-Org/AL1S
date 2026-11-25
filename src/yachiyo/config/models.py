@@ -140,6 +140,7 @@ class MCPServerSettings(FrozenModel):
     bearer_secret: StrictName | None = None
     allowed_tools: tuple[str, ...] = ()
     trusted_read_only_tools: tuple[str, ...] = ()
+    confirm_writes: bool = True
     access: Literal["public", "private", "admin", "private_admin"] = "private"
     read_only: bool = True
     timeout_seconds: float = Field(30, ge=1, le=300)

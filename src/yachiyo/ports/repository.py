@@ -71,8 +71,6 @@ class Repository(Protocol):
         self, session: SessionKey, role_name: str, event_key: str | None = None
     ) -> None: ...
 
-    async def append_message(self, session: SessionKey, message: StoredMessage) -> int: ...
-
     async def recent_messages(self, session: SessionKey, limit: int) -> Sequence[StoredMessage]: ...
 
     async def reset_conversation(
@@ -124,17 +122,3 @@ class Repository(Protocol):
     async def database_stats(self) -> dict[str, int]: ...
 
     async def user_stats(self, identity_id: int) -> dict[str, int]: ...
-
-    async def record_usage(
-        self,
-        identity_id: int,
-        conversation_id: str,
-        run_id: str,
-        model: str,
-        input_tokens: int,
-        output_tokens: int,
-    ) -> None: ...
-
-    async def enqueue_job(
-        self, kind: str, scope: str, payload: dict[str, Any], *, delay_seconds: int = 0
-    ) -> str: ...

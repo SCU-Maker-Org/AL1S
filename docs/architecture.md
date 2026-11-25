@@ -85,8 +85,8 @@ replies. The SQLite repository owns the transaction that records each reply.
 The durable outbox provides at-least-once delivery. Telegram and Discord do not expose
 a transaction spanning multi-part sends, so a process or network failure after a
 platform accepts only part of a response can duplicate that accepted prefix on replay.
-Model and remote read-only tool calls are likewise at-least-once across process crashes;
-non-read-only MCP calls require a separately persisted user approval.
+Model and direct MCP tool calls are likewise at-least-once across process crashes.
+By default, non-read-only MCP calls require a separately persisted user approval.
 
 ## Data model
 
@@ -110,7 +110,7 @@ in a single transaction. Older v2 databases may retain unused vector tables.
   environment variables. Effective configuration and logs never contain secret values.
 - MCP accepts only configured HTTP endpoints, does not spawn commands, prefixes every
   tool name, requires an explicit non-empty allowlist, limits response bytes, filters
-  access and requires persistent approval for every non-read-only tool.
+  access and checks whether the server requires approval for writes.
 - Media and reverse-image integrations validate HTTPS hosts, resolved public IPs,
   redirects, MIME types, magic bytes, response sizes and timeouts.
 - The workspace MCP server is a separate container. It rejects traversal, `.git` file

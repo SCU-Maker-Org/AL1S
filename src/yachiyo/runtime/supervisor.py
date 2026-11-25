@@ -8,7 +8,7 @@ import time
 from collections.abc import Callable, Sequence
 
 from yachiyo.application.chat import ChatApplication
-from yachiyo.domain import ResponsePlan
+from yachiyo.domain import InboundEvent, ResponsePlan
 from yachiyo.ports.transport import CommandDescriptor, Transport
 
 TransportFactory = Callable[[], Transport]
@@ -55,18 +55,14 @@ class TransportSupervisor:
                     except Exception:
                         self._logger.exception("inbound event failed")
                         return
-                    if response is not None:
-                        async with self._delivery_lock:
-                            if (
-                                not response.track_delivery
-                                or await self.application.delivery_pending(event)
-                            ):
-                                await self._deliver(
-                                    current_transport,
-                                    event,
-                                    response,
-                                    attempts=1,
-                                )
+                    if response is None:
+                        return
+                    async with self._delivery_lock:
+                        if response.track_delivery and not await self.application.delivery_pending(
+                            event
+                        ):
+                            return
+                        await self._deliver(current_transport, event, response)
 
                 delivery_task = asyncio.create_task(
                     self._replay_outbox(transport), name=f"outbox:{self.name}"
@@ -102,36 +98,26 @@ class TransportSupervisor:
         self._state = "stopped"
 
     async def _deliver(
-        self,
-        transport: Transport,
-        event,
-        response: ResponsePlan,
-        *,
-        attempts: int,
-    ) -> bool:
-        last_error = "response delivery failed"
-        for attempt in range(attempts):
-            try:
-                await transport.send(event, response)
-            except Exception as exc:
-                last_error = f"{type(exc).__name__}: {exc}"
-                if attempt + 1 == attempts:
-                    self._logger.exception("response delivery failed")
-                    break
-                await asyncio.sleep(2**attempt)
-            else:
-                if response.track_delivery:
-                    try:
-                        await self.application.mark_delivered(event)
-                    except Exception:
-                        self._logger.exception("response was delivered but acknowledgement failed")
-                return True
+        self, transport: Transport, event: InboundEvent, response: ResponsePlan
+    ) -> None:
+        try:
+            await transport.send(event, response)
+        except Exception as exc:
+            self._logger.exception("response delivery failed")
+            if response.track_delivery:
+                try:
+                    await self.application.mark_delivery_failed(
+                        event, f"{type(exc).__name__}: {exc}"
+                    )
+                except Exception:
+                    self._logger.exception("failed to record response delivery failure")
+            return
+
         if response.track_delivery:
             try:
-                await self.application.mark_delivery_failed(event, last_error)
+                await self.application.mark_delivered(event)
             except Exception:
-                self._logger.exception("failed to record response delivery failure")
-        return False
+                self._logger.exception("response was delivered but acknowledgement failed")
 
     async def _replay_outbox(self, transport: Transport) -> None:
         while not self._stop.is_set():
@@ -148,7 +134,7 @@ class TransportSupervisor:
                         try:
                             if not await self.application.delivery_pending(event):
                                 continue
-                            await self._deliver(transport, event, response, attempts=1)
+                            await self._deliver(transport, event, response)
                         except asyncio.CancelledError:
                             raise
                         except Exception:

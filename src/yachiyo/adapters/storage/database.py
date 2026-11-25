@@ -35,7 +35,6 @@ from yachiyo.domain import (
     ResponsePlan,
     RoleDefinition,
     SessionKey,
-    SessionScope,
     StoredMessage,
     TransportName,
 )
@@ -88,10 +87,6 @@ def _serialized(method: Callable[..., Any]) -> Callable[..., Any]:
 
 def _now() -> str:
     return datetime.now(UTC).isoformat()
-
-
-def _as_datetime(value: str) -> datetime:
-    return datetime.fromisoformat(value)
 
 
 class Database:
@@ -1002,8 +997,8 @@ class Database:
         return ConversationState(
             session=session,
             role_name=str(row["role_name"]),
-            created_at=_as_datetime(row["created_at"]),
-            updated_at=_as_datetime(row["updated_at"]),
+            created_at=datetime.fromisoformat(row["created_at"]),
+            updated_at=datetime.fromisoformat(row["updated_at"]),
         )
 
     @_serialized
@@ -1028,31 +1023,8 @@ class Database:
             raise
 
     @_serialized
-    async def append_message(self, session: SessionKey, message: StoredMessage) -> int:
-        cursor = await self.connection.execute(
-            """
-            INSERT INTO messages(conversation_id, role, content, run_id, model, status, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                session.stable_id,
-                message.role.value,
-                message.content,
-                message.run_id,
-                message.model,
-                message.status,
-                message.created_at.isoformat(),
-            ),
-        )
-        await self.connection.execute(
-            "UPDATE conversations SET updated_at=? WHERE id=?", (_now(), session.stable_id)
-        )
-        await self.connection.commit()
-        return int(cursor.lastrowid or 0)
-
-    @_serialized
     async def recent_messages(self, session: SessionKey, limit: int) -> list[StoredMessage]:
-        cursor = await self.connection.execute(
+        rows = await self.connection.execute_fetchall(
             """
             SELECT role, content, run_id, model, status, created_at
             FROM messages WHERE conversation_id=?
@@ -1060,7 +1032,6 @@ class Database:
             """,
             (session.stable_id, limit),
         )
-        rows = list(reversed(await cursor.fetchall()))
         return [
             StoredMessage(
                 role=MessageRole(row["role"]),
@@ -1068,9 +1039,9 @@ class Database:
                 run_id=row["run_id"],
                 model=row["model"],
                 status=row["status"],
-                created_at=_as_datetime(row["created_at"]),
+                created_at=datetime.fromisoformat(row["created_at"]),
             )
-            for row in rows
+            for row in reversed(rows)
         ]
 
     @_serialized
@@ -1124,14 +1095,14 @@ class Database:
     @_serialized
     async def list_roles(self, owner_key: str | None = None) -> list[RoleDefinition]:
         owner = owner_key or ""
-        cursor = await self.connection.execute(
+        rows = await self.connection.execute_fetchall(
             """
             SELECT owner_key, name, description, system_prompt, greeting, farewell
             FROM roles WHERE owner_key IN ('', ?) ORDER BY owner_key, name
             """,
             (owner,),
         )
-        return [self._role_from_row(row) for row in await cursor.fetchall()]
+        return [self._role_from_row(row) for row in rows]
 
     @_serialized
     async def get_role(self, name: str, owner_key: str | None = None) -> RoleDefinition | None:
@@ -1192,6 +1163,10 @@ class Database:
 
     @_serialized
     async def set_profile(self, identity_id: int, content: str, source: str) -> None:
+        await self._upsert_profile(identity_id, content, source)
+        await self.connection.commit()
+
+    async def _upsert_profile(self, identity_id: int, content: str, source: str) -> None:
         digest = hashlib.sha256(content.encode()).hexdigest()
         await self.connection.execute(
             """
@@ -1203,7 +1178,6 @@ class Database:
             """,
             (identity_id, content, digest, source, _now()),
         )
-        await self.connection.commit()
 
     @_serialized
     async def set_profile_once(
@@ -1227,17 +1201,7 @@ class Database:
             if current_hash != expected_hash:
                 await self.connection.rollback()
                 return "conflict"
-            digest = hashlib.sha256(content.encode()).hexdigest()
-            await self.connection.execute(
-                """
-                INSERT INTO profiles(identity_id, content, content_hash, source, updated_at)
-                VALUES (?, ?, ?, ?, ?)
-                ON CONFLICT(identity_id) DO UPDATE SET
-                    content=excluded.content, content_hash=excluded.content_hash,
-                    source=excluded.source, updated_at=excluded.updated_at
-                """,
-                (identity_id, content, digest, source, _now()),
-            )
+            await self._upsert_profile(identity_id, content, source)
             await self._record_command_effect(event_key, "profile")
             await self.connection.commit()
             return "applied"
@@ -1340,14 +1304,14 @@ class Database:
 
     @_serialized
     async def list_memories(self, scope: KnowledgeScope, limit: int = 20) -> list[dict[str, Any]]:
-        cursor = await self.connection.execute(
+        rows = await self.connection.execute_fetchall(
             """
             SELECT id, content, category, importance, created_at, updated_at
             FROM memories WHERE scope=? ORDER BY updated_at DESC LIMIT ?
             """,
             (scope.key, limit),
         )
-        return [dict(row) for row in await cursor.fetchall()]
+        return [dict(row) for row in rows]
 
     @_serialized
     async def delete_memory(self, entry_id: str, scope: KnowledgeScope) -> bool:
@@ -1362,14 +1326,14 @@ class Database:
 
     @_serialized
     async def memory_ids_beyond(self, scope: KnowledgeScope, keep: int) -> list[str]:
-        cursor = await self.connection.execute(
+        rows = await self.connection.execute_fetchall(
             """
             SELECT id FROM memories WHERE scope=?
             ORDER BY updated_at DESC, id DESC LIMIT -1 OFFSET ?
             """,
             (scope.key, keep),
         )
-        return [str(row[0]) for row in await cursor.fetchall()]
+        return [str(row[0]) for row in rows]
 
     @_serialized
     async def database_stats(self) -> dict[str, int]:
@@ -1422,89 +1386,6 @@ class Database:
         )
         messages = int((await cursor.fetchone())[0])
         return {"conversations": conversations, "messages": messages}
-
-    @_serialized
-    async def conversation_from_id(self, conversation_id: str) -> ConversationState | None:
-        cursor = await self.connection.execute(
-            "SELECT * FROM conversations WHERE id=?", (conversation_id,)
-        )
-        row = await cursor.fetchone()
-        if row is None:
-            return None
-        owner_key = str(row["owner_key"])
-        if owner_key == "shared":
-            actor = ExternalIdentity(TransportName(row["transport"]), "shared")
-        else:
-            provider, external_id = owner_key.split(":", 1)
-            actor = ExternalIdentity(TransportName(provider), external_id)
-        address = ConversationAddress(
-            transport=TransportName(row["transport"]),
-            bot_id=row["bot_id"],
-            chat_id=row["chat_external_id"],
-            thread_id=row["thread_id"],
-            kind=ChatKind.PRIVATE if row["scope"] == "private" else ChatKind.GROUP,
-        )
-        return ConversationState(
-            session=SessionKey(address, actor, SessionScope(row["scope"])),
-            role_name=row["role_name"],
-            created_at=_as_datetime(row["created_at"]),
-            updated_at=_as_datetime(row["updated_at"]),
-        )
-
-    @_serialized
-    async def record_usage(
-        self,
-        identity_id: int,
-        conversation_id: str,
-        run_id: str,
-        model: str,
-        input_tokens: int,
-        output_tokens: int,
-    ) -> None:
-        await self.connection.execute(
-            """
-            INSERT INTO usage_events(
-                identity_id, conversation_id, run_id, model,
-                input_tokens, output_tokens, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                identity_id,
-                conversation_id,
-                run_id,
-                model,
-                input_tokens,
-                output_tokens,
-                _now(),
-            ),
-        )
-        await self.connection.commit()
-
-    @_serialized
-    async def enqueue_job(
-        self, kind: str, scope: str, payload: dict[str, Any], *, delay_seconds: int = 0
-    ) -> str:
-        job_id = uuid.uuid4().hex
-        now = datetime.now(UTC)
-        await self.connection.execute(
-            """
-            INSERT INTO jobs(
-                id, kind, scope, payload_json, status, attempts, available_at,
-                created_at, updated_at
-            ) VALUES (?, ?, ?, ?, 'pending', 0, ?, ?, ?)
-            """,
-            (
-                job_id,
-                kind,
-                scope,
-                json.dumps(payload, ensure_ascii=False),
-                (now + timedelta(seconds=delay_seconds)).isoformat(),
-                now.isoformat(),
-                now.isoformat(),
-            ),
-        )
-        await self.connection.commit()
-        return job_id
 
     @_serialized
     async def lease_jobs(self, *, limit: int) -> list[dict[str, Any]]:

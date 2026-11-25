@@ -40,8 +40,6 @@ class Runtime:
         self.settings = loaded.settings
         self.database = Database(self.settings, loaded.paths)
         self.model = OpenAICompatibleModel(self.settings, loaded.secrets)
-        self.knowledge: SQLiteKnowledgeIndex | None = None
-        self.memory: MemoryService | None = None
         self.tools: ToolRegistry = EmptyToolRegistry()
         self.reverse_image: ReverseImageService | None = None
         self.supervisors: list[TransportSupervisor] = []
@@ -76,10 +74,10 @@ class Runtime:
                 for role in self.settings.roles
             )
         )
-        self.knowledge = SQLiteKnowledgeIndex(self.database, self.settings)
-        self.memory = MemoryService(
+        knowledge = SQLiteKnowledgeIndex(self.database, self.settings)
+        memory = MemoryService(
             self.database,
-            self.knowledge,
+            knowledge,
             self.model,
             self.settings,
         )
@@ -95,8 +93,8 @@ class Runtime:
             self.database,
             self.settings,
             profiles,
-            self.memory,
-            self.knowledge,
+            memory,
+            knowledge,
             self.tools,
             self.reverse_image,
         )
@@ -104,7 +102,7 @@ class Runtime:
             self.database,
             self.settings,
             agent,
-            self.knowledge,
+            knowledge,
             commands,
             profiles,
             SessionLockPool(),
@@ -114,11 +112,7 @@ class Runtime:
         self.supervisors = self._build_supervisors(application)
         self.worker = PersistentJobWorker(
             self.database,
-            (
-                {"memory.extract": self.memory.extract_exchange}
-                if self.settings.memory.enabled
-                else {}
-            ),
+            ({"memory.extract": memory.extract_exchange} if self.settings.memory.enabled else {}),
             handler_timeout_seconds=min(90.0, self.settings.policies.request_timeout_seconds),
         )
         self.heartbeat = Heartbeat(
